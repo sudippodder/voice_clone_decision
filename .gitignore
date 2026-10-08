@@ -1,0 +1,112 @@
+# ==============================================================================
+# Environment Variables & Secrets (CRITICAL: Never commit API keys or secrets)
+# ==============================================================================
+.env
+.env.*
+*.env
+backend/.env
+backend/.env.*
+frontend/.env.local
+frontend/.env.*.local
+!*.env.example
+!.env.example
+
+# ==============================================================================
+# Python & Virtual Environments
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ==============================================================================
+# Node.js & Next.js
+# ==============================================================================
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+out/
+frontend/out/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Next.js build and cache
+.turbo/
+.vercel/
+
+# ==============================================================================
+# Uploads, Audio Samples & Runtime Data
+# ==============================================================================
+uploads/
+backend/uploads/*
+!backend/uploads/.gitkeep
+*.webm
+*.mp3
+*.wav
+*.m4a
+*.ogg
+
+# SQLite / Local Databases
+*.sqlite
+*.sqlite3
+*.db
+backend/*.db
+
+# ==============================================================================
+# Operating System & Editor Files
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Tt]humbs.db
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
