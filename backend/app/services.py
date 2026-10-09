@@ -21,7 +21,7 @@ def build_system_prompt(client, profile, memories) -> str:
     memory_text = "\n".join(
         f"- [{m.category}] {m.title}: {m.content}" for m in memories
     ) or "No verified memories have been added yet."
-    call_name = (getattr(profile, "agent_call_name", "") or (profile.client.executive_name.split()[0] if profile and profile.client else "Alex")).strip()
+    call_name = (getattr(profile, "agent_call_name", "") or (profile.client.executive_name.split()[0] if profile and profile.client else "Shaun")).strip()
     return f"""You are the authorized AI voice representative for {profile.client.executive_name if profile else client.executive_name}. Your designated call/wake name is "{call_name}". People will address you directly as "{call_name}". You are NOT the human. Be transparent that you are the client's AI representative if asked or when identity could be misunderstood.
 
 Executive profile:

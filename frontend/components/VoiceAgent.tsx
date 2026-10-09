@@ -1,6 +1,6 @@
 'use client';
 import { useRef, useState } from 'react';
-const API=process.env.NEXT_PUBLIC_API_URL||'http://localhost:8000'; const KEY=process.env.NEXT_PUBLIC_ADMIN_API_KEY||'change-this-admin-key';
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'; const KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY || 'change-this-admin-key';
 export function VoiceAgent({ data }: { data: any }) {
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -146,15 +146,14 @@ export function VoiceAgent({ data }: { data: any }) {
 
         {/* Visualizer Circle */}
         <div
-          className={`mx-auto my-8 w-36 h-36 rounded-full flex flex-col items-center justify-center border-2 transition-all duration-300 ${
-            recording
-              ? 'border-red-500 bg-red-500/20 scale-105 shadow-[0_0_35px_rgba(239,68,68,0.4)]'
-              : busy
+          className={`mx-auto my-8 w-36 h-36 rounded-full flex flex-col items-center justify-center border-2 transition-all duration-300 ${recording
+            ? 'border-red-500 bg-red-500/20 scale-105 shadow-[0_0_35px_rgba(239,68,68,0.4)]'
+            : busy
               ? 'border-amber-400 bg-amber-500/10 animate-pulse'
               : playing
-              ? 'border-emerald-400 bg-emerald-500/10 shadow-[0_0_25px_rgba(52,211,153,0.3)]'
-              : 'border-violet-500/40 bg-violet-500/10'
-          }`}
+                ? 'border-emerald-400 bg-emerald-500/10 shadow-[0_0_25px_rgba(52,211,153,0.3)]'
+                : 'border-violet-500/40 bg-violet-500/10'
+            }`}
         >
           <div className="text-4xl">
             {recording ? '🔴' : busy ? '⏳' : playing ? '🔊' : '🎙️'}
@@ -171,10 +170,10 @@ export function VoiceAgent({ data }: { data: any }) {
           {recording
             ? 'Listening... Speak clearly, then click "Stop & Send" when done.'
             : busy
-            ? 'Analyzing speech & synthesizing executive reply...'
-            : playing
-            ? 'Alex is speaking...'
-            : 'Click "Start Talking", say your message, and click "Stop & Send".'}
+              ? 'Analyzing speech & synthesizing executive reply...'
+              : playing
+                ? 'speaking...'
+                : 'Click "Start Talking", say your message, and click "Stop & Send".'}
         </p>
 
         {/* Action Controls */}

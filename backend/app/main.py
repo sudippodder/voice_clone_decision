@@ -26,7 +26,7 @@ def startup():
     db = next(get_db())
     try:
         if db.query(Client).count() == 0:
-            c = Client(name="Demo Client", executive_name="Alex Morgan", company="Demo Company", industry="Technology")
+            c = Client(name="Demo Client", executive_name="Shaun Morgan", company="Demo Company", industry="Technology")
             db.add(c); db.flush()
             db.add(ExecutiveProfile(
                 client_id=c.id,
@@ -126,7 +126,7 @@ def create_client(payload: ClientCreate, db: Session = Depends(get_db)):
 
     c = Client(**data)
     db.add(c); db.flush()
-    call_name = payload.executive_name.split()[0] if payload.executive_name else "Alex"
+    call_name = payload.executive_name.split()[0] if payload.executive_name else "Shaun"
     profile = ExecutiveProfile(
         client_id=c.id,
         voice_id=v_id,

@@ -36,7 +36,7 @@ class ExecutiveProfile(Base):
     voice_provider: Mapped[str] = mapped_column(String(50), default="openai")
     voice_authorized: Mapped[bool] = mapped_column(Boolean, default=False)
     voice_consent_text: Mapped[str] = mapped_column(Text, default="")
-    agent_call_name: Mapped[str] = mapped_column(String(100), default="Alex")
+    agent_call_name: Mapped[str] = mapped_column(String(100), default="Shaun")
     client = relationship("Client", back_populates="profile")
 
 class Memory(Base):

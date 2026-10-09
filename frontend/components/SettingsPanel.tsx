@@ -262,7 +262,7 @@ export function SettingsPanel({
         body: JSON.stringify({
           ...form,
           voice_name: voiceName,
-          agent_call_name: form.agent_call_name || executiveName.trim().split(' ')[0] || 'Alex',
+          agent_call_name: form.agent_call_name || executiveName.trim().split(' ')[0] || 'Shaun',
         }),
       });
       setSaving(false);
@@ -466,7 +466,7 @@ export function SettingsPanel({
               className="input font-semibold text-white focus:border-violet-500 bg-slate-900"
               value={executiveName}
               onChange={(e) => setExecutiveName(e.target.value)}
-              placeholder="e.g. Alex Morgan, Sudip Podder"
+              placeholder="e.g. Shaun Morgan, Sudip Podder"
             />
             <p className="text-[11px] text-slate-400 mt-1">Primary executive persona name represented by the AI</p>
           </div>
@@ -658,11 +658,10 @@ export function SettingsPanel({
           <button
             type="button"
             onClick={() => setActiveVoiceTab('clone')}
-            className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${
-              activeVoiceTab === 'clone'
+            className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${activeVoiceTab === 'clone'
                 ? 'border-violet-500 text-violet-300'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
+              }`}
           >
             <span>🎙️</span>
             Instant Voice Cloning (Audio Upload)
@@ -674,11 +673,10 @@ export function SettingsPanel({
           <button
             type="button"
             onClick={() => setActiveVoiceTab('library')}
-            className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${
-              activeVoiceTab === 'library'
+            className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${activeVoiceTab === 'library'
                 ? 'border-violet-500 text-violet-300'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
+              }`}
           >
             <span>📁</span>
             ElevenLabs Library & Custom ID
@@ -692,11 +690,10 @@ export function SettingsPanel({
           <button
             type="button"
             onClick={() => setActiveVoiceTab('openai')}
-            className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${
-              activeVoiceTab === 'openai'
+            className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${activeVoiceTab === 'openai'
                 ? 'border-violet-500 text-violet-300'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
+              }`}
           >
             <span>🤖</span>
             OpenAI Preset Personas
@@ -835,11 +832,10 @@ export function SettingsPanel({
                   type="button"
                   onClick={uploadAndCloneVoice}
                   disabled={cloning || !voiceFile}
-                  className={`w-full sm:w-auto px-6 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg transition ${
-                    cloning || !voiceFile
+                  className={`w-full sm:w-auto px-6 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg transition ${cloning || !voiceFile
                       ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
                       : 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-600/30 hover:scale-[1.01]'
-                  }`}
+                    }`}
                 >
                   {cloning ? (
                     <>
@@ -902,11 +898,10 @@ export function SettingsPanel({
                     return (
                       <div
                         key={v.voice_id}
-                        className={`p-3.5 rounded-xl border flex flex-col justify-between transition ${
-                          isSelected
+                        className={`p-3.5 rounded-xl border flex flex-col justify-between transition ${isSelected
                             ? 'bg-violet-950/40 border-violet-500 ring-1 ring-violet-500'
                             : 'bg-slate-900/80 border-slate-800 hover:border-slate-700'
-                        }`}
+                          }`}
                       >
                         <div>
                           <div className="flex items-center justify-between mb-1">
@@ -927,11 +922,10 @@ export function SettingsPanel({
                           <button
                             type="button"
                             onClick={() => playPreview(v.voice_id, 'elevenlabs')}
-                            className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition ${
-                              isPlaying
+                            className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition ${isPlaying
                                 ? 'bg-emerald-600 text-white animate-pulse'
                                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-                            }`}
+                              }`}
                           >
                             {isPlaying ? '■ Playing' : '▶ Preview'}
                           </button>
@@ -940,11 +934,10 @@ export function SettingsPanel({
                             type="button"
                             onClick={() => saveVoiceConfig(v.voice_id, 'elevenlabs', v.name)}
                             disabled={manualSaving}
-                            className={`flex-1 py-1 px-2.5 rounded text-xs font-semibold transition ${
-                              isSelected
+                            className={`flex-1 py-1 px-2.5 rounded text-xs font-semibold transition ${isSelected
                                 ? 'bg-emerald-600 text-white'
                                 : 'bg-violet-600 hover:bg-violet-500 text-white'
-                            }`}
+                              }`}
                           >
                             {isSelected ? '✓ Active Voice' : 'Set as Voice'}
                           </button>
@@ -1037,11 +1030,10 @@ export function SettingsPanel({
                       setCustomVoiceId(voice.id);
                       setVoiceProvider('openai');
                     }}
-                    className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                      isSelected
+                    className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${isSelected
                         ? 'bg-violet-950/40 border-violet-500 shadow-[0_0_20px_rgba(139,92,246,0.25)] ring-1 ring-violet-500'
                         : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900/90'
-                    }`}
+                      }`}
                   >
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
@@ -1068,11 +1060,10 @@ export function SettingsPanel({
                           e.stopPropagation();
                           playPreview(voice.id, 'openai');
                         }}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
-                          isPlaying
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${isPlaying
                             ? 'bg-emerald-600 text-white animate-pulse'
                             : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-                        }`}
+                          }`}
                       >
                         {isPlaying ? '■ Playing…' : '▶ Preview'}
                       </button>
@@ -1084,11 +1075,10 @@ export function SettingsPanel({
                           saveVoiceConfig(voice.id, 'openai');
                         }}
                         disabled={manualSaving}
-                        className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition ${
-                          isSelected
+                        className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition ${isSelected
                             ? 'bg-violet-600 hover:bg-violet-500 text-white shadow-sm'
                             : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-                        }`}
+                          }`}
                       >
                         {isSelected ? 'Saved as Active' : 'Select & Save'}
                       </button>

@@ -36,7 +36,7 @@ class ProfileUpdate(BaseModel):
     people_context: str = ""
     agent_rules: str = ""
     preferred_language: str = "English"
-    agent_call_name: str = "Alex"
+    agent_call_name: str = "Shaun"
     voice_name: str | None = None
     model_config = ConfigDict(extra="ignore")
 

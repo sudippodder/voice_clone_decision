@@ -477,7 +477,7 @@ export function ClientList({
         try {
           const j = JSON.parse(errText);
           msg = j.detail || j.message || errText;
-        } catch {}
+        } catch { }
         throw new Error(msg);
       }
 
@@ -523,7 +523,7 @@ export function ClientList({
         try {
           const j = JSON.parse(errText);
           msg = j.detail || errText;
-        } catch {}
+        } catch { }
         throw new Error(msg);
       }
       showToast(`✓ Voice renamed to "${renameVoiceName.trim()}"`);
@@ -626,11 +626,10 @@ export function ClientList({
       <div className="flex border-b border-slate-800 gap-2">
         <button
           onClick={() => setActiveTab('clients')}
-          className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${
-            activeTab === 'clients'
+          className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${activeTab === 'clients'
               ? 'border-violet-500 text-violet-300'
               : 'border-transparent text-slate-400 hover:text-slate-200'
-          }`}
+            }`}
         >
           <span>👥</span>
           Executive Clients
@@ -641,11 +640,10 @@ export function ClientList({
 
         <button
           onClick={() => setActiveTab('voices')}
-          className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${
-            activeTab === 'voices'
+          className={`pb-3 px-4 text-sm font-bold flex items-center gap-2 border-b-2 transition ${activeTab === 'voices'
               ? 'border-violet-500 text-violet-300'
               : 'border-transparent text-slate-400 hover:text-slate-200'
-          }`}
+            }`}
         >
           <span>🎙️</span>
           Voice IDs & Clones Library (Separate List)
@@ -676,11 +674,10 @@ export function ClientList({
                 <button
                   key={st}
                   onClick={() => setClientStatusFilter(st)}
-                  className={`px-3 py-1 text-xs rounded-lg font-semibold capitalize transition ${
-                    clientStatusFilter === st
+                  className={`px-3 py-1 text-xs rounded-lg font-semibold capitalize transition ${clientStatusFilter === st
                       ? 'bg-violet-600 text-white'
                       : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                  }`}
+                    }`}
                 >
                   {st}
                 </button>
@@ -730,11 +727,10 @@ export function ClientList({
                           </p>
                         </div>
                         <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                            c.active
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${c.active
                               ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30'
                               : 'bg-slate-800 text-slate-400 border border-slate-700'
-                          }`}
+                            }`}
                         >
                           {c.active ? 'Active' : 'Inactive'}
                         </span>
@@ -761,11 +757,10 @@ export function ClientList({
                             <button
                               type="button"
                               onClick={() => playVoicePreview(c.voice_id!, null, c.voice_provider || 'elevenlabs')}
-                              className={`text-[11px] font-bold px-2 py-0.5 rounded transition ${
-                                isPlaying
+                              className={`text-[11px] font-bold px-2 py-0.5 rounded transition ${isPlaying
                                   ? 'bg-emerald-600 text-white animate-pulse'
                                   : 'bg-violet-950/80 text-violet-300 hover:bg-violet-900 border border-violet-500/30'
-                              }`}
+                                }`}
                             >
                               {isPlaying ? '■ Playing' : '▶ Audio'}
                             </button>
@@ -877,11 +872,10 @@ export function ClientList({
                 <button
                   key={cat}
                   onClick={() => setVoiceCategoryFilter(cat)}
-                  className={`px-3 py-1 text-xs rounded-lg font-semibold capitalize transition ${
-                    voiceCategoryFilter === cat
+                  className={`px-3 py-1 text-xs rounded-lg font-semibold capitalize transition ${voiceCategoryFilter === cat
                       ? 'bg-violet-600 text-white'
                       : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                  }`}
+                    }`}
                 >
                   {cat === 'all' ? 'All Voices' : cat === 'cloned' ? 'Custom Clones' : 'Premade'}
                 </button>
@@ -925,11 +919,10 @@ export function ClientList({
                 return (
                   <div
                     key={v.voice_id}
-                    className={`p-4 rounded-xl border flex flex-col justify-between transition-all shadow-md ${
-                      isCloned
+                    className={`p-4 rounded-xl border flex flex-col justify-between transition-all shadow-md ${isCloned
                         ? 'bg-gradient-to-br from-violet-950/30 via-slate-900 to-slate-900 border-violet-500/50 ring-1 ring-violet-500/20'
                         : 'bg-slate-900/80 border-slate-800'
-                    }`}
+                      }`}
                   >
                     <div>
                       {/* Name & Category Badge */}
@@ -946,11 +939,10 @@ export function ClientList({
                           </button>
                         </div>
                         <span
-                          className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0 ${
-                            isCloned
+                          className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0 ${isCloned
                               ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
                               : 'bg-slate-800 text-slate-300 border border-slate-700'
-                          }`}
+                            }`}
                         >
                           {isCloned ? '🎙️ CLONED' : v.category || 'VOICE'}
                         </span>
@@ -998,11 +990,10 @@ export function ClientList({
                       <button
                         type="button"
                         onClick={() => playVoicePreview(v.voice_id, v.preview_url, v.provider)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition ${
-                          isPlaying
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition ${isPlaying
                             ? 'bg-emerald-600 text-white animate-pulse'
                             : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-                        }`}
+                          }`}
                       >
                         {isPlaying ? '■ Playing…' : '▶ Preview'}
                       </button>
@@ -1502,7 +1493,7 @@ export function ClientList({
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. Alex Morgan Strategic Tone"
+                  placeholder="e.g. Shaun Morgan Strategic Tone"
                   value={cloneVoiceName}
                   onChange={(e) => setCloneVoiceName(e.target.value)}
                   className="input text-xs"
