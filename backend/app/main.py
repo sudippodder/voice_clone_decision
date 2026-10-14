@@ -1,18 +1,18 @@
 import base64
 from pathlib import Path
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from .config import settings
 from .db import Base, engine, get_db
-from .models import Client, ExecutiveProfile, Memory, Conversation, Message, CommunicationSituation, ExecutiveProfileVersion, ExecutiveProfileRecord
-from .graph_memory import upsert_memory
+from .models import Client, ExecutiveProfile, Memory, Conversation, Message, CommunicationSituation, ExecutiveProfileVersion, ExecutiveProfileRecord, KnowledgeChunk, VoiceClone
+from .graph_memory import upsert_memory, delete_client_graph
 from .vector_memory import save_chunks
 from pypdf import PdfReader
 import io
 import json
 from datetime import datetime
-from .schemas import ClientCreate, ProfileUpdate, MemoryCreate, VoiceConfig
+from .schemas import ClientCreate, ClientUpdate, ProfileUpdate, MemoryCreate, VoiceConfig, VoiceCloneCreate, VoiceCloneUpdate, VoiceTestRequest, LoginRequest
 from .security import require_admin
 from .services import clone_voice, generate_response, synthesize_voice, transcribe_audio
 
@@ -47,6 +47,25 @@ def startup():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.post("/api/auth/login")
+def api_login(payload: LoginRequest):
+    if payload.username == "admin" and payload.password == "pass123":
+        return {
+            "success": True,
+            "username": "admin",
+            "token": "admin-session-" + (settings.admin_api_key or "change-this-admin-key"),
+            "admin_api_key": settings.admin_api_key or "change-this-admin-key",
+            "message": "Authentication successful"
+        }
+    raise HTTPException(status_code=401, detail="Invalid username or password")
+
+@app.get("/api/auth/verify")
+def api_verify(x_admin_key: str | None = Header(default=None)):
+    if settings.admin_api_key and x_admin_key != settings.admin_api_key:
+        raise HTTPException(status_code=401, detail="Session expired or invalid")
+    return {"authenticated": True, "username": "admin"}
+
 
 @app.get("/api/clients", dependencies=[Depends(require_admin)])
 def clients(db: Session = Depends(get_db)):
@@ -166,13 +185,49 @@ def restore_profile_version(client_id: int, version_id: int, db: Session = Depen
     db.commit(); db.refresh(p); return p
 
 @app.patch("/api/clients/{client_id}", dependencies=[Depends(require_admin)])
+@app.put("/api/clients/{client_id}", dependencies=[Depends(require_admin)])
 def update_client(client_id: int, payload: dict, db: Session = Depends(get_db)):
     c = db.get(Client, client_id)
     if not c: raise HTTPException(404, "Client not found")
     allowed = {"name", "executive_name", "company", "industry", "email", "phone"}
     for key, value in payload.items():
-        if key in allowed: setattr(c, key, str(value)[:320])
+        if key in allowed and value is not None:
+            setattr(c, key, str(value).strip()[:320])
+        elif key == "active" and value is not None:
+            setattr(c, "active", bool(value))
     db.commit(); db.refresh(c); return c
+
+@app.delete("/api/clients/{client_id}", dependencies=[Depends(require_admin)])
+def delete_client(client_id: int, db: Session = Depends(get_db)):
+    c = db.get(Client, client_id)
+    if not c:
+        raise HTTPException(404, "Client not found")
+
+    # 1. Clean conversations and messages
+    conv_ids = [conv.id for conv in db.query(Conversation).filter_by(client_id=client_id).all()]
+    if conv_ids:
+        db.query(Message).filter(Message.conversation_id.in_(conv_ids)).delete(synchronize_session=False)
+        db.query(Conversation).filter_by(client_id=client_id).delete(synchronize_session=False)
+
+    # 2. Clean knowledge chunks, situations, profile records, profile versions, memories, profile
+    db.query(KnowledgeChunk).filter_by(client_id=client_id).delete(synchronize_session=False)
+    db.query(CommunicationSituation).filter_by(client_id=client_id).delete(synchronize_session=False)
+    db.query(ExecutiveProfileRecord).filter_by(client_id=client_id).delete(synchronize_session=False)
+    db.query(ExecutiveProfileVersion).filter_by(client_id=client_id).delete(synchronize_session=False)
+    db.query(Memory).filter_by(client_id=client_id).delete(synchronize_session=False)
+    db.query(ExecutiveProfile).filter_by(client_id=client_id).delete(synchronize_session=False)
+
+    # 3. Clean client
+    db.delete(c)
+    db.commit()
+
+    # 4. Clean graph memory if configured
+    try:
+        delete_client_graph(client_id)
+    except Exception:
+        pass
+
+    return {"ok": True, "message": f"Client {client_id} deleted successfully"}
 
 @app.put("/api/clients/{client_id}/voice", dependencies=[Depends(require_admin)])
 def update_voice(client_id: int, payload: VoiceConfig, db: Session = Depends(get_db)):
@@ -181,6 +236,18 @@ def update_voice(client_id: int, payload: VoiceConfig, db: Session = Depends(get
     if payload.voice_authorized and not payload.voice_consent_text.strip():
         raise HTTPException(400, "Voice consent text is required")
     for k, v in payload.model_dump().items(): setattr(c.profile, k, v)
+    if payload.voice_id:
+        # Sync with VoiceClone table
+        existing = db.query(VoiceClone).filter_by(client_id=client_id, voice_id=payload.voice_id).first()
+        if not existing:
+            db.query(VoiceClone).filter_by(client_id=client_id).update({"is_active": False})
+            vc = VoiceClone(client_id=client_id, name=f"{c.executive_name} Voice", voice_id=payload.voice_id, provider=payload.voice_provider or "elevenlabs", consent_text=payload.voice_consent_text, is_active=True)
+            db.add(vc)
+        else:
+            db.query(VoiceClone).filter_by(client_id=client_id).update({"is_active": False})
+            existing.is_active = True
+            existing.provider = payload.voice_provider or existing.provider
+            existing.consent_text = payload.voice_consent_text or existing.consent_text
     db.commit(); db.refresh(c.profile)
     return c.profile
 
@@ -199,8 +266,254 @@ async def create_voice_clone(client_id: int, consent_text: str = Form(...), file
     c.profile.voice_provider = "elevenlabs"
     c.profile.voice_authorized = True
     c.profile.voice_consent_text = consent_text
+
+    # Register in VoiceClone table
+    db.query(VoiceClone).filter_by(client_id=client_id).update({"is_active": False})
+    vc = VoiceClone(client_id=client_id, name=f"{c.executive_name} Voice Clone", voice_id=voice_id, provider="elevenlabs", consent_text=consent_text, sample_filename=file.filename or "sample.webm", is_active=True)
+    db.add(vc)
     db.commit()
     return {"voice_id": voice_id, "provider": "elevenlabs", "authorized": True}
+
+@app.get("/api/voices", dependencies=[Depends(require_admin)])
+def list_voice_clones(db: Session = Depends(get_db)):
+    # Auto-sync existing client profile voices
+    clients_with_voices = db.query(Client).join(Client.profile).filter(ExecutiveProfile.voice_id != "").all()
+    for cl in clients_with_voices:
+        if cl.profile and cl.profile.voice_id:
+            exists = db.query(VoiceClone).filter_by(client_id=cl.id, voice_id=cl.profile.voice_id).first()
+            if not exists:
+                db.add(VoiceClone(
+                    client_id=cl.id,
+                    name=f"{cl.executive_name} Primary Voice",
+                    voice_id=cl.profile.voice_id,
+                    provider=cl.profile.voice_provider or "elevenlabs",
+                    consent_text=cl.profile.voice_consent_text or "",
+                    is_active=True
+                ))
+                db.commit()
+
+    records = db.query(VoiceClone).order_by(VoiceClone.is_active.desc(), VoiceClone.id.desc()).all()
+    res = []
+    for r in records:
+        cl = db.get(Client, r.client_id)
+        res.append({
+            "id": r.id,
+            "client_id": r.client_id,
+            "client_name": cl.name if cl else "Unknown",
+            "executive_name": cl.executive_name if cl else "Unknown",
+            "company": cl.company if cl else "",
+            "name": r.name,
+            "voice_id": r.voice_id,
+            "provider": r.provider,
+            "description": r.description or "",
+            "consent_text": r.consent_text or "",
+            "sample_filename": r.sample_filename or "",
+            "is_active": r.is_active,
+            "created_at": r.created_at,
+            "updated_at": r.updated_at
+        })
+    return res
+
+@app.post("/api/voices", dependencies=[Depends(require_admin)])
+def create_voice_clone_record(payload: VoiceCloneCreate, db: Session = Depends(get_db)):
+    client = db.get(Client, payload.client_id)
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    if payload.is_active:
+        db.query(VoiceClone).filter_by(client_id=payload.client_id).update({"is_active": False})
+        if client.profile:
+            client.profile.voice_id = payload.voice_id.strip()
+            client.profile.voice_provider = payload.provider.strip()
+            client.profile.voice_authorized = True
+            client.profile.voice_consent_text = payload.consent_text.strip()
+
+    vc = VoiceClone(
+        client_id=payload.client_id,
+        name=payload.name.strip(),
+        voice_id=payload.voice_id.strip(),
+        provider=payload.provider.strip() or "elevenlabs",
+        description=payload.description.strip(),
+        consent_text=payload.consent_text.strip(),
+        is_active=payload.is_active
+    )
+    db.add(vc)
+    db.commit()
+    db.refresh(vc)
+    return {
+        "id": vc.id,
+        "client_id": vc.client_id,
+        "client_name": client.name,
+        "executive_name": client.executive_name,
+        "company": client.company,
+        "name": vc.name,
+        "voice_id": vc.voice_id,
+        "provider": vc.provider,
+        "description": vc.description,
+        "consent_text": vc.consent_text,
+        "sample_filename": vc.sample_filename,
+        "is_active": vc.is_active,
+        "created_at": vc.created_at,
+        "updated_at": vc.updated_at
+    }
+
+@app.post("/api/voices/clone", dependencies=[Depends(require_admin)])
+async def clone_voice_for_client(
+    client_id: int = Form(...),
+    name: str = Form(default=""),
+    description: str = Form(default=""),
+    consent_text: str = Form(default=""),
+    set_active: bool = Form(default=True),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    client = db.get(Client, client_id)
+    if not client or not client.profile:
+        raise HTTPException(404, "Client not found")
+    if not consent_text.strip():
+        raise HTTPException(400, "Consent text is required")
+    audio = await file.read()
+    if len(audio) < 1_000:
+        raise HTTPException(400, "Voice sample audio is too small")
+
+    voice_title = name.strip() or f"{client.executive_name} Voice Twin"
+    try:
+        voice_id = clone_voice(voice_title, audio, file.filename or "voice.webm")
+    except Exception as e:
+        raise HTTPException(502, f"Voice cloning provider error: {e}")
+
+    if set_active:
+        db.query(VoiceClone).filter_by(client_id=client_id).update({"is_active": False})
+        client.profile.voice_id = voice_id
+        client.profile.voice_provider = "elevenlabs"
+        client.profile.voice_authorized = True
+        client.profile.voice_consent_text = consent_text.strip()
+
+    vc = VoiceClone(
+        client_id=client_id,
+        name=voice_title,
+        voice_id=voice_id,
+        provider="elevenlabs",
+        description=description.strip(),
+        consent_text=consent_text.strip(),
+        sample_filename=file.filename or "sample.webm",
+        is_active=set_active
+    )
+    db.add(vc)
+    db.commit()
+    db.refresh(vc)
+    return {
+        "id": vc.id,
+        "client_id": vc.client_id,
+        "client_name": client.name,
+        "executive_name": client.executive_name,
+        "company": client.company,
+        "name": vc.name,
+        "voice_id": vc.voice_id,
+        "provider": vc.provider,
+        "description": vc.description,
+        "consent_text": vc.consent_text,
+        "sample_filename": vc.sample_filename,
+        "is_active": vc.is_active,
+        "created_at": vc.created_at,
+        "updated_at": vc.updated_at
+    }
+
+@app.patch("/api/voices/{voice_record_id}", dependencies=[Depends(require_admin)])
+def update_voice_clone_record(voice_record_id: int, payload: VoiceCloneUpdate, db: Session = Depends(get_db)):
+    vc = db.get(VoiceClone, voice_record_id)
+    if not vc:
+        raise HTTPException(404, "Voice clone not found")
+    client = db.get(Client, vc.client_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    if "is_active" in data and data["is_active"]:
+        db.query(VoiceClone).filter_by(client_id=vc.client_id).update({"is_active": False})
+        if client and client.profile:
+            client.profile.voice_id = data.get("voice_id", vc.voice_id)
+            client.profile.voice_provider = data.get("provider", vc.provider)
+            client.profile.voice_authorized = True
+            client.profile.voice_consent_text = data.get("consent_text", vc.consent_text)
+
+    for k, v in data.items():
+        if v is not None:
+            setattr(vc, k, v)
+    vc.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(vc)
+    return {
+        "id": vc.id,
+        "client_id": vc.client_id,
+        "client_name": client.name if client else "Unknown",
+        "executive_name": client.executive_name if client else "Unknown",
+        "company": client.company if client else "",
+        "name": vc.name,
+        "voice_id": vc.voice_id,
+        "provider": vc.provider,
+        "description": vc.description,
+        "consent_text": vc.consent_text,
+        "sample_filename": vc.sample_filename,
+        "is_active": vc.is_active,
+        "created_at": vc.created_at,
+        "updated_at": vc.updated_at
+    }
+
+@app.post("/api/voices/{voice_record_id}/activate", dependencies=[Depends(require_admin)])
+def activate_voice_for_client(voice_record_id: int, db: Session = Depends(get_db)):
+    vc = db.get(VoiceClone, voice_record_id)
+    if not vc:
+        raise HTTPException(404, "Voice clone not found")
+    client = db.get(Client, vc.client_id)
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    db.query(VoiceClone).filter_by(client_id=vc.client_id).update({"is_active": False})
+    vc.is_active = True
+    if client.profile:
+        client.profile.voice_id = vc.voice_id
+        client.profile.voice_provider = vc.provider
+        client.profile.voice_authorized = True
+        client.profile.voice_consent_text = vc.consent_text
+    db.commit()
+    return {"ok": True, "message": f"Voice '{vc.name}' set as active for {client.name}"}
+
+@app.delete("/api/voices/{voice_record_id}", dependencies=[Depends(require_admin)])
+def delete_voice_clone_record(voice_record_id: int, db: Session = Depends(get_db)):
+    vc = db.get(VoiceClone, voice_record_id)
+    if not vc:
+        raise HTTPException(404, "Voice clone not found")
+    client = db.get(Client, vc.client_id)
+    was_active = vc.is_active
+    client_id = vc.client_id
+    db.delete(vc)
+    db.commit()
+
+    if was_active and client and client.profile:
+        remaining = db.query(VoiceClone).filter_by(client_id=client_id).order_by(VoiceClone.id.desc()).first()
+        if remaining:
+            remaining.is_active = True
+            client.profile.voice_id = remaining.voice_id
+            client.profile.voice_provider = remaining.provider
+            client.profile.voice_authorized = True
+            client.profile.voice_consent_text = remaining.consent_text
+        else:
+            client.profile.voice_id = ""
+            client.profile.voice_authorized = False
+        db.commit()
+    return {"ok": True, "message": "Voice clone deleted"}
+
+@app.post("/api/voices/test", dependencies=[Depends(require_admin)])
+def test_voice_synthesis(payload: VoiceTestRequest):
+    if not payload.voice_id.strip():
+        raise HTTPException(400, "Voice ID is required")
+    try:
+        audio_bytes, mime = synthesize_voice(payload.text.strip() or "Hello, this is a test.", payload.voice_id.strip())
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode(),
+            "mime_type": mime
+        }
+    except Exception as e:
+        raise HTTPException(502, f"Speech synthesis failed: {e}")
 
 @app.post("/api/clients/{client_id}/memories", dependencies=[Depends(require_admin)])
 def add_memory(client_id: int, payload: MemoryCreate, db: Session = Depends(get_db)):

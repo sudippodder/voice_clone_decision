@@ -9,6 +9,10 @@ textarea { resize: vertical; }
 .btn-primary { background: #7c5cff; color: white; }
 .btn-primary:hover { background: #6d4df0; }
 .btn-secondary { background: #1b2333; border: 1px solid #30394e; }
+.btn-danger { background: #881337; border: 1px solid #9f1239; color: #ffe4e6; }
+.btn-danger:hover:not(:disabled) { background: #9f1239; color: #ffffff; }
+.btn-quiet-danger { background: transparent; border: 1px solid #4c1d29; color: #fb7185; }
+.btn-quiet-danger:hover:not(:disabled) { background: #38121d; border-color: #9f1239; color: #fecdd3; }
 .input { width: 100%; background: #0c111d; border: 1px solid #30394e; border-radius: 10px; padding: 11px 12px; outline: none; }
 .input:focus { border-color: #7c5cff; }
 .label { display:block; font-size: 13px; font-weight: 700; color: #b9c1d4; margin-bottom: 7px; }
@@ -25,74 +29,3 @@ textarea { resize: vertical; }
 /* Repeatable executive profile records, preferences and readiness */
 .preference-sliders{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 18px;padding:16px;margin:0 0 20px;background:#0d1220;border:1px solid #252d40;border-radius:13px}.slider-field{padding:7px 0 12px}.slider-field .label{display:flex;align-items:center;justify-content:space-between;gap:10px}.slider-field strong{color:#b9adff;font-size:11px}.slider-field input[type=range]{width:100%;accent-color:#8d7aff}.preference-sliders>.helper-text{grid-column:1/-1;line-height:1.6}.repeatable-area{border-top:1px solid #252d40;margin-top:24px;padding-top:22px}.repeatable-head h4,.record-editor h4{font-size:14px;font-weight:800;margin:0 0 5px}.repeatable-head p{font-size:11px;color:#8996ad;line-height:1.6;margin:0 0 14px}.record-search{margin:0 0 8px}.record-row{display:flex;align-items:flex-start;gap:8px;padding:14px 0;border-bottom:1px solid #252d40}.record-main{flex:1;min-width:0}.record-main strong{font-size:12px}.record-main p{font-size:11px;line-height:1.6;color:#8996ad;white-space:pre-wrap;overflow-wrap:anywhere;margin:5px 0 8px}.record-editor{background:#0d1220;border:1px solid #30394e;border-radius:13px;padding:17px;margin-top:18px}.record-editor h4{margin-bottom:16px}.readiness-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.readiness-tile{background:#0c111d;border:1px solid #30394e;border-radius:12px;padding:16px}.readiness-tile span{font-size:10px;color:#8996ad;display:block}.readiness-tile strong{display:block;font-size:19px;margin:8px 0;color:#c7bcff}.readiness-tile p{font-size:10px;line-height:1.5;color:#8996ad;margin:0}.version-actions{display:flex;flex-direction:column;align-items:flex-end;gap:8px}.version-actions time{font-size:10px;color:#8996ad}.identity-card{margin-bottom:16px}.identity-card .structured-fields{margin-bottom:8px}
 @media(max-width:560px){.preference-sliders,.readiness-grid{grid-template-columns:1fr}.record-row{flex-wrap:wrap}.record-main{flex-basis:100%}.version-actions{align-items:flex-start}.record-row .btn{flex:1}}
-
-/* Logout button */
-.logout-button {
-  position: fixed;
-  top: 1rem;
-  right: 1rem;
-  z-index: 1000;
-}
-
-/* Login Page Styles */
-.login-background {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 100vh;
-  background: linear-gradient(135deg, #0a0c12, #161a25);
-  background-attachment: fixed;
-}
-.login-card {
-  background: rgba(17, 22, 36, 0.85);
-  backdrop-filter: blur(12px);
-  border-radius: 20px;
-  padding: 3rem 2.5rem;
-  width: 100%;
-  max-width: 380px;
-  box-shadow: 0 12px 30px rgba(0,0,0,0.15);
-  text-align: center;
-}
-.login-title {
-  font-size: 1.8rem;
-  font-weight: 800;
-  margin-bottom: 1.5rem;
-  color: #e0e7ff;
-}
-.login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.login-input {
-  background: #0c111d;
-  border: 1px solid #30394e;
-  border-radius: 10px;
-  padding: 0.9rem 1rem;
-  color: #e0e7ff;
-  font-size: 0.95rem;
-  transition: border-color 0.2s;
-}
-.login-input:focus {
-  outline: none;
-  border-color: #7c5cff;
-  box-shadow: 0 0 0 3px #7c5cff1c;
-}
-.login-button {
-  background: #7c5cff;
-  color: #fff;
-  border: none;
-  border-radius: 10px;
-  padding: 0.9rem;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-.login-button:hover {
-  background: #6d4df0;
-}
-.login-error {
-  color: #ff6b6b;
-  font-size: 0.9rem;
-  margin-top: 0.5rem;
-}

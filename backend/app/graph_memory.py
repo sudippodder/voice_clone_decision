@@ -75,3 +75,19 @@ def close_driver():
     if _driver is not None:
         _driver.close()
         _driver = None
+
+
+def delete_client_graph(client_id: int):
+    d = driver()
+    if not d:
+        return
+    try:
+        with d.session() as session:
+            session.run("""
+            MATCH (c:Client {client_id: $client_id})
+            OPTIONAL MATCH (c)-[:HAS_MEMORY]->(m:Memory)
+            DETACH DELETE m, c
+            """, client_id=client_id)
+    except Exception:
+        pass
+

@@ -7,6 +7,17 @@ class ClientCreate(BaseModel):
     industry: str = ""
     email: str = ""
     phone: str = ""
+    active: bool = True
+
+class ClientUpdate(BaseModel):
+    name: str | None = None
+    executive_name: str | None = None
+    company: str | None = None
+    industry: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    active: bool | None = None
+    model_config = ConfigDict(extra="ignore")
 
 class ProfileUpdate(BaseModel):
     about: str = ""
@@ -45,6 +56,30 @@ class VoiceConfig(BaseModel):
     voice_authorized: bool = False
     voice_consent_text: str = ""
 
+class VoiceCloneCreate(BaseModel):
+    client_id: int
+    name: str
+    voice_id: str
+    provider: str = "elevenlabs"
+    description: str = ""
+    consent_text: str = ""
+    is_active: bool = True
+    model_config = ConfigDict(extra="ignore")
+
+class VoiceCloneUpdate(BaseModel):
+    name: str | None = None
+    voice_id: str | None = None
+    provider: str | None = None
+    description: str | None = None
+    consent_text: str | None = None
+    is_active: bool | None = None
+    client_id: int | None = None
+    model_config = ConfigDict(extra="ignore")
+
+class VoiceTestRequest(BaseModel):
+    voice_id: str
+    text: str = "Hello, this is a test of your executive digital voice clone."
+
 class MemoryCreate(BaseModel):
     category: str = "general"
     title: str = ""
@@ -55,3 +90,8 @@ class VoiceTurnResponse(BaseModel):
     response: str
     audio_base64: str
     mime_type: str = "audio/mpeg"
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+

@@ -45,6 +45,7 @@ class Client(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     profile = relationship("ExecutiveProfile", back_populates="client", uselist=False, cascade="all, delete-orphan")
     memories = relationship("Memory", back_populates="client", cascade="all, delete-orphan")
+    voice_clones = relationship("VoiceClone", back_populates="client", cascade="all, delete-orphan")
 
 class ExecutiveProfile(Base):
     __tablename__ = "executive_profiles"
@@ -156,3 +157,20 @@ class ExecutiveProfileRecord(Base):
     verification_status: Mapped[str] = mapped_column(String(40), default="needs_review")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class VoiceClone(Base):
+    __tablename__ = "voice_clones"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    voice_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), default="elevenlabs")
+    description: Mapped[str] = mapped_column(Text, default="")
+    consent_text: Mapped[str] = mapped_column(Text, default="")
+    sample_filename: Mapped[str] = mapped_column(String(300), default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    client = relationship("Client", back_populates="voice_clones")

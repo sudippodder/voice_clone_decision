@@ -1,18 +1,18 @@
-
 import './globals.css';
-import LogoutButton from './components/LogoutButton';
-import AuthWrapper from './components/AuthWrapper';
-export const metadata = { title: 'Executive Voice Agent', description: 'Digital executive voice agent' };
+import { AuthGuard } from '../components/AuthGuard';
+
+export const metadata = {
+  title: 'Executive Voice Agent',
+  description: 'Digital executive voice agent system',
+};
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <AuthWrapper>
-          <LogoutButton />
-          {children}
-        </AuthWrapper>
+        <AuthGuard>{children}</AuthGuard>
       </body>
     </html>
   );
 }
+

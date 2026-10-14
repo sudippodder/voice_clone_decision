@@ -3,8 +3,8 @@ import { useEffect, useState } from 'react';
 import { SettingsPanel } from './SettingsPanel';
 import { VoiceAgent } from './VoiceAgent';
 const API=process.env.NEXT_PUBLIC_API_URL||'http://localhost:8000'; const KEY=process.env.NEXT_PUBLIC_ADMIN_API_KEY||'change-this-admin-key';
-export function ClientWorkspace({clientId,onBack}:{clientId:number;onBack:()=>void}){
- const [data,setData]=useState<any>(null); const [tab,setTab]=useState<'settings'|'agent'>('settings');
+export function ClientWorkspace({clientId,initialTab='settings',onBack}:{clientId:number;initialTab?:'settings'|'agent';onBack:()=>void}){
+ const [data,setData]=useState<any>(null); const [tab,setTab]=useState<'settings'|'agent'>(initialTab);
  const [error,setError]=useState<string|null>(null);
  async function load(){
   try{
