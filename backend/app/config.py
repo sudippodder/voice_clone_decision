@@ -10,10 +10,11 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5-mini"
     elevenlabs_api_key: str = ""
     elevenlabs_model_id: str = "eleven_multilingual_v2"
-    tts_provider: str = "elevenlabs"
-    openai_tts_model: str = "tts-1"
-    openai_tts_voice: str = "onyx"
+    embedding_model: str = "text-embedding-3-small"
+    neo4j_uri: str = ""
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "change-this-neo4j-password"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
 settings = Settings()
