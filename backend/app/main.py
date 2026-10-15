@@ -58,11 +58,22 @@ def health():
 @app.post("/api/auth/login")
 def api_login(payload: LoginRequest):
     if payload.username == "admin" and payload.password == "pass123":
+        admin_key = settings.admin_api_key or "change-this-admin-key"
+        token = f"admin-session-{admin_key}"
         return {
+            "ok": True,
             "success": True,
+            "user": {
+                "username": "admin",
+                "name": "Administrator",
+                "role": "admin",
+                "email": "admin@executivemind.ai",
+            },
             "username": "admin",
-            "token": "admin-session-" + (settings.admin_api_key or "change-this-admin-key"),
-            "admin_api_key": settings.admin_api_key or "change-this-admin-key",
+            "token": token,
+            "access_token": token,
+            "admin_api_key": admin_key,
+            "admin_key": admin_key,
             "message": "Authentication successful"
         }
     raise HTTPException(status_code=401, detail="Invalid username or password")
