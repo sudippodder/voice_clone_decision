@@ -33,6 +33,37 @@ def startup():
             conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
         except Exception:
             pass
+
+        # Auto-migrate missing columns for existing databases
+        migration_statements = [
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS responsibilities TEXT DEFAULT ''",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS thinking_examples TEXT DEFAULT ''",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS default_tone VARCHAR(40) DEFAULT 'professional'",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS default_directness VARCHAR(30) DEFAULT 'balanced'",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS response_length VARCHAR(30) DEFAULT 'moderate'",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS formality VARCHAR(30) DEFAULT 'formal'",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS humor_level VARCHAR(30) DEFAULT 'occasional'",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS greeting VARCHAR(500) DEFAULT ''",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS closing VARCHAR(500) DEFAULT ''",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS risk_tolerance INTEGER NOT NULL DEFAULT 50",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS long_term_orientation INTEGER NOT NULL DEFAULT 65",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS attention_to_detail INTEGER NOT NULL DEFAULT 70",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS decision_speed INTEGER NOT NULL DEFAULT 55",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS openness_to_ideas INTEGER NOT NULL DEFAULT 65",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS preferred_evidence VARCHAR(50) NOT NULL DEFAULT 'balanced'",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS speaking_pace VARCHAR(40) NOT NULL DEFAULT 'moderate'",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS accent_notes VARCHAR(500) NOT NULL DEFAULT ''",
+            "ALTER TABLE executive_profiles ADD COLUMN IF NOT EXISTS timezone VARCHAR(80) NOT NULL DEFAULT 'Asia/Kolkata'",
+            "ALTER TABLE clients ADD COLUMN IF NOT EXISTS email VARCHAR(320) DEFAULT ''",
+            "ALTER TABLE clients ADD COLUMN IF NOT EXISTS phone VARCHAR(50) DEFAULT ''",
+            "ALTER TABLE clients ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE",
+        ]
+        for stmt in migration_statements:
+            try:
+                conn.execute(__import__("sqlalchemy").text(stmt))
+            except Exception:
+                pass
+
     Base.metadata.create_all(bind=engine)
     db = next(get_db())
     try:
