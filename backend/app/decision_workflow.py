@@ -17,8 +17,14 @@ class DecisionState(TypedDict, total=False):
     response: str
 
 def retrieve_node(state: DecisionState) -> DecisionState:
-    graph_memories = retrieve_related(state["client_id"], state["user_text"])
-    vector_memories = search_chunks(state["client_id"], state["user_text"])
+    try:
+        graph_memories = retrieve_related(state["client_id"], state["user_text"])
+    except Exception:
+        graph_memories = []
+    try:
+        vector_memories = search_chunks(state["client_id"], state["user_text"])
+    except Exception:
+        vector_memories = []
     return {"graph_memories": graph_memories, "vector_memories": vector_memories}
 
 def reason_node(state: DecisionState) -> DecisionState:
