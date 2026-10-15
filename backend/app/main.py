@@ -638,4 +638,6 @@ async def voice_turn(client_id: int, audio: UploadFile = File(...), conversation
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(502, str(e))
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(502, f"Voice processing error: {str(e)}")
