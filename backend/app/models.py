@@ -5,6 +5,7 @@ import json
 from pgvector.sqlalchemy import Vector as _PgVector
 
 class SafeVector(_PgVector):
+    cache_ok = True
     def get_col_spec(self, **kw):
         return "JSON"
 

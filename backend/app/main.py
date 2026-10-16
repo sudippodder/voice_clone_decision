@@ -606,6 +606,62 @@ async def upload_knowledge(client_id: int, file: UploadFile = File(...), db: Ses
         db.rollback()
         raise HTTPException(502, f"Knowledge ingestion failed: {exc}")
 
+@app.get("/api/clients/{client_id}/knowledge", dependencies=[Depends(require_admin)])
+def list_knowledge(client_id: int, db: Session = Depends(get_db)):
+    c = db.get(Client, client_id)
+    if not c:
+        raise HTTPException(404, "Client not found")
+    chunks = db.query(KnowledgeChunk).filter(KnowledgeChunk.client_id == client_id).order_by(KnowledgeChunk.source_name.asc(), KnowledgeChunk.chunk_index.asc()).all()
+    documents_map = {}
+    for ch in chunks:
+        sname = ch.source_name or "upload"
+        if sname not in documents_map:
+            documents_map[sname] = {
+                "source_name": sname,
+                "chunk_count": 0,
+                "total_characters": 0,
+                "created_at": ch.created_at,
+                "has_embeddings": False,
+                "chunks": [],
+            }
+        doc = documents_map[sname]
+        doc["chunk_count"] += 1
+        doc["total_characters"] += len(ch.content or "")
+        if ch.embedding is not None:
+            doc["has_embeddings"] = True
+        doc["chunks"].append({
+            "id": ch.id,
+            "chunk_index": ch.chunk_index,
+            "content": ch.content,
+            "char_count": len(ch.content or ""),
+            "has_embedding": ch.embedding is not None,
+            "created_at": ch.created_at,
+        })
+    docs = list(documents_map.values())
+    return {
+        "client_id": client_id,
+        "total_documents": len(docs),
+        "total_chunks": len(chunks),
+        "documents": docs
+    }
+
+@app.delete("/api/clients/{client_id}/knowledge", dependencies=[Depends(require_admin)])
+def delete_knowledge_source(client_id: int, source_name: str, db: Session = Depends(get_db)):
+    c = db.get(Client, client_id)
+    if not c:
+        raise HTTPException(404, "Client not found")
+    deleted_chunks = db.query(KnowledgeChunk).filter(
+        KnowledgeChunk.client_id == client_id,
+        KnowledgeChunk.source_name == source_name
+    ).delete(synchronize_session=False)
+    db.query(Memory).filter(
+        Memory.client_id == client_id,
+        Memory.category == "uploaded_knowledge",
+        Memory.title == source_name
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"ok": True, "deleted_chunks": deleted_chunks, "source_name": source_name}
+
 @app.delete("/api/memories/{memory_id}", dependencies=[Depends(require_admin)])
 def delete_memory(memory_id: int, db: Session = Depends(get_db)):
     m = db.get(Memory, memory_id)

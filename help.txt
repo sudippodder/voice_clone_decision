@@ -49,3 +49,10 @@ Uses documented principles over generic answers.
 Transparently flags when documentation is missing rather than hallucinating facts.
 Voice Synthesis: The final response is spoken back in the executive's enrolled 
 voice using ElevenLabs.
+
+
+
+
+
+REDIS_URL=redis://127.0.0.1:6379/0
+NEO4J_URI=bolt://127.0.0.1:7687

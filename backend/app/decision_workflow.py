@@ -1,3 +1,21 @@
+# Compatibility patch for newer or mismatched LangChain package versions
+try:
+    import langchain
+    if not hasattr(langchain, "debug"):
+        langchain.debug = False
+    if not hasattr(langchain, "verbose"):
+        langchain.verbose = False
+    if not hasattr(langchain, "llm_cache"):
+        langchain.llm_cache = None
+except Exception:
+    pass
+
+try:
+    import langchain_core.globals
+    langchain_core.globals._HAS_LANGCHAIN = False
+except Exception:
+    pass
+
 from typing import TypedDict, Any
 from langgraph.graph import StateGraph, END
 from openai import OpenAI
@@ -85,8 +103,30 @@ def build_graph():
     graph.add_edge("reason", END)
     return graph.compile()
 
-workflow = build_graph()
+
+try:
+    workflow = build_graph()
+except Exception:
+    workflow = None
 
 def run_decision(client_id: int, client: Any, profile: Any, memories: list, history: list, user_text: str) -> str:
-    result = workflow.invoke({"client_id":client_id, "client":client, "profile":profile, "memories":memories, "history":history, "user_text":user_text})
-    return result["response"]
+    state = {
+        "client_id": client_id,
+        "client": client,
+        "profile": profile,
+        "memories": memories,
+        "history": history,
+        "user_text": user_text,
+    }
+    if workflow is not None:
+        try:
+            result = workflow.invoke(state)
+            return result["response"]
+        except Exception:
+            pass
+
+    # Direct fallback: executes retrieval and reasoning without LangGraph runner overhead
+    retrieved = retrieve_node(state)
+    state.update(retrieved)
+    reasoned = reason_node(state)
+    return reasoned["response"]
