@@ -12,7 +12,7 @@ An actionable task breakdown and phased roadmap for **ExecutiveMind AI (voice_cl
 | **Phase 2** | Voice Cloning & Voice ID Library Integration | **COMPLETED** | 100% |
 | **Phase 3** | Access Control & Executive Profile Ingestion | **COMPLETED** | 100% |
 | **Phase 4** | Real-Time Latency & Full-Duplex Voice Engine | **PLANNED** | 15% |
-| **Phase 5** | RAG Knowledge Base & Document Context | **PLANNED** | 0% |
+| **Phase 5** | RAG Knowledge Base & Database-Grounded Intelligence | **COMPLETED** | 100% |
 | **Phase 6** | Telephony Integration & External Channels (Twilio/SIP) | **PLANNED** | 0% |
 | **Phase 7** | Governance, Consent Auditing & Safety Railguards | **PLANNED** | 20% |
 | **Phase 8** | Production Hardening, CI/CD & Cloud Deployment | **PLANNED** | 10% |
@@ -64,18 +64,21 @@ An actionable task breakdown and phased roadmap for **ExecutiveMind AI (voice_cl
 
 ---
 
-### 📚 Phase 5: RAG & Document Knowledge Base
-> **Goal**: Allow executives to upload company documents, pitch decks, FAQs, and Slack exports to ground the AI agent in deep factual context.
+### 📚 Phase 5: RAG & Database-Grounded Decision Intelligence
+> **Goal**: Allow executives to upload company documents, pitch decks, FAQs, and Slack exports to ground the AI agent in deep factual context without hallucination or conversational chatter.
 
-- [ ] **Document Ingestion Engine**:
-  - [ ] Support PDF, DOCX, TXT, and Markdown file uploads per client.
-  - [ ] Text chunking and cleaning with metadata tagging.
-- [ ] **Vector Database & Embeddings**:
-  - [ ] Integrate pgvector (in PostgreSQL) or Qdrant/Chroma.
-  - [ ] Generate embeddings using `text-embedding-3-small`.
-- [ ] **Semantic Retrieval in System Prompt**:
-  - [ ] Query vector store during user turns and inject relevant document snippets into the prompt dynamically.
-  - [ ] Source attribution: Have the agent cite document sources or section titles when providing data.
+- [x] **Document Ingestion Engine**:
+  - [x] PDF text extraction (PyPDF) and UTF-8 text file parsing per client.
+  - [x] Chunking (1,000–1,200 chars) with metadata tagging.
+- [x] **Vector Database & Embeddings**:
+  - [x] PostgreSQL `KnowledgeChunk` storage with pgvector / safe-vector fallback.
+  - [x] Embedding generation using OpenAI `text-embedding-3-small`.
+  - [x] Strict cosine similarity cutoff (`min_similarity=0.40`, distance $\le 0.60$) to filter out irrelevant chunks.
+- [x] **Multi-Table Retrieval & LangGraph Evidence Gate**:
+  - [x] Multi-source retrieval: `KnowledgeChunk` (pgvector), `ExecutiveProfileRecord` (principles/cases), `CommunicationSituation`, and Neo4j graph relations.
+  - [x] Evidence sufficiency gate routing: short-circuits to standardized refusal if no database records exist, completely preventing hallucinations.
+  - [x] Pure greeting routing: detects greetings and routes to configured executive greeting.
+  - [x] Decision engine prompt with token budgets (120 / 220 / 450) and anti-chatter post-processing sanitizer.
 
 ---
 
@@ -130,9 +133,9 @@ An actionable task breakdown and phased roadmap for **ExecutiveMind AI (voice_cl
 
 ## 📌 Recommended Next Sprint Priorities
 
-1. **Sprint 1 (Immediate Next Step)**: **Phase 4 - Streaming Voice Engine**.
-   - Reduces response latency from ~3-4s to <1s for conversation realism.
-2. **Sprint 2**: **Phase 5 - Document Uploads (RAG)**.
-   - Enables uploading executive playbooks, FAQs, and company guidelines.
-3. **Sprint 3**: **Phase 6 - Inbound Phone Line (Twilio)**.
-   - Allows live phone calls to Shaun's voice agent over cellular networks.
+1. **Phase 5 (COMPLETED)**: **RAG & Database-Grounded Intelligence**.
+   - Fully implemented with pgvector similarity gating, multi-table retrieval, and LangGraph evidence gate.
+2. **Sprint 1 (Immediate Next Step)**: **Phase 4 - Streaming Voice Engine**.
+   - Transition to streaming TTS (ElevenLabs WebSocket) and live audio chunk playback for sub-second latency.
+3. **Sprint 2**: **Phase 6 - Inbound Phone Line (Twilio / SIP)**.
+   - Live cellular telephony integration for inbound executive representation.

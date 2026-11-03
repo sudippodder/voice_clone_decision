@@ -34,7 +34,10 @@ def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
     except Exception:
         return 0.0
 
-def search_chunks(client_id: int, query: str, limit: int = 5) -> list[str]:
+def search_chunks(client_id: int, query: str, limit: int = 4, min_similarity: float = 0.40) -> list[dict]:
+    """Search vector chunks for a specific client with a strict similarity cutoff.
+    Returns an empty list if no chunks meet the minimum relevance threshold.
+    """
     try:
         embedding = embed_text(query)
         if embedding is None:
@@ -43,11 +46,25 @@ def search_chunks(client_id: int, query: str, limit: int = 5) -> list[str]:
         try:
             # Try native pgvector query if extension is present
             try:
-                rows = db.execute(select(KnowledgeChunk).where(
+                max_distance = 1.0 - min_similarity
+                stmt = select(
+                    KnowledgeChunk,
+                    KnowledgeChunk.embedding.cosine_distance(embedding).label("distance")
+                ).where(
                     KnowledgeChunk.client_id == client_id,
-                    KnowledgeChunk.embedding.is_not(None)
-                ).order_by(KnowledgeChunk.embedding.cosine_distance(embedding)).limit(limit)).scalars().all()
-                return [f"[Vector source: {row.source_name}] {row.content}" for row in rows]
+                    KnowledgeChunk.embedding.is_not(None),
+                    KnowledgeChunk.embedding.cosine_distance(embedding) <= max_distance
+                ).order_by("distance").limit(limit)
+
+                results = db.execute(stmt).all()
+                return [
+                    {
+                        "source": row.KnowledgeChunk.source_name or "upload",
+                        "content": row.KnowledgeChunk.content,
+                        "similarity": round(1.0 - float(row.distance), 3)
+                    }
+                    for row in results
+                ]
             except Exception:
                 db.rollback()
                 # Fallback: in-memory cosine similarity (works on standard PostgreSQL without pgvector)
@@ -61,9 +78,17 @@ def search_chunks(client_id: int, query: str, limit: int = 5) -> list[str]:
                 for row in rows:
                     if row.embedding:
                         sim = _cosine_similarity(row.embedding, embedding)
-                        scored.append((sim, row))
+                        if sim >= min_similarity:
+                            scored.append((sim, row))
                 scored.sort(key=lambda x: x[0], reverse=True)
-                return [f"[Vector source: {row.source_name}] {row.content}" for _, row in scored[:limit]]
+                return [
+                    {
+                        "source": row.source_name or "upload",
+                        "content": row.content,
+                        "similarity": round(sim, 3)
+                    }
+                    for sim, row in scored[:limit]
+                ]
         finally:
             db.close()
     except Exception as e:
