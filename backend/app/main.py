@@ -1,6 +1,6 @@
 import base64
 from pathlib import Path
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from .config import settings
@@ -15,8 +15,16 @@ from datetime import datetime
 from .schemas import ClientCreate, ClientUpdate, ProfileUpdate, MemoryCreate, VoiceConfig, VoiceCloneCreate, VoiceCloneUpdate, VoiceTestRequest, LoginRequest
 from .security import require_admin
 from .services import clone_voice, generate_response, synthesize_voice, transcribe_audio
+from .storage import save_audio_file, save_pcm_as_wav, update_conversation_metadata, get_concatenated_call_audio, RECORDINGS_DIR
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 
 app = FastAPI(title="Executive Voice Agent API", version="0.1.0")
+
+recordings_dir = Path("backend/recordings") if Path("backend").exists() else Path("recordings")
+recordings_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/recordings", StaticFiles(directory=str(recordings_dir)), name="recordings")
 #app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +65,14 @@ def startup():
             "ALTER TABLE clients ADD COLUMN IF NOT EXISTS email VARCHAR(320) DEFAULT ''",
             "ALTER TABLE clients ADD COLUMN IF NOT EXISTS phone VARCHAR(50) DEFAULT ''",
             "ALTER TABLE clients ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title VARCHAR(255) DEFAULT ''",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS summary TEXT DEFAULT ''",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel VARCHAR(50) DEFAULT 'voice'",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS duration_seconds DOUBLE PRECISION DEFAULT 0.0",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_url VARCHAR(500) DEFAULT NULL",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_duration DOUBLE PRECISION DEFAULT NULL",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_mime VARCHAR(100) DEFAULT NULL",
         ]
         for stmt in migration_statements:
             try:
@@ -676,20 +692,80 @@ async def voice_turn(client_id: int, audio: UploadFile = File(...), conversation
     if not p.voice_authorized or not p.voice_id:
         raise HTTPException(400, "An authorized cloned voice is not configured for this client")
     raw = await audio.read()
+    if not raw or len(raw) < 1000:
+        raise HTTPException(400, "Audio recording was too short or silent. Please speak clearly for at least 1-2 seconds.")
     try:
-        transcript = transcribe_audio(raw, audio.filename or "audio.webm")
+        transcript = transcribe_audio(raw, audio.filename or "audio.webm", client_name=c.executive_name)
+        if not transcript or not transcript.strip():
+            raise HTTPException(400, "No clear speech detected in recording. Please check your microphone and speak clearly.")
         conversation = db.get(Conversation, conversation_id) if conversation_id else None
         if conversation is None or conversation.client_id != client_id:
-            conversation = Conversation(client_id=client_id); db.add(conversation); db.flush()
+            conversation = Conversation(client_id=client_id, channel="voice_http")
+            db.add(conversation)
+            db.flush()
+        
+        # Save user audio
+        ext = "webm"
+        if audio.filename and "." in audio.filename:
+            ext = audio.filename.rsplit(".", 1)[-1].lower()
+        
+        user_msg = Message(conversation_id=conversation.id, role="user", text=transcript)
+        db.add(user_msg)
+        db.flush()
+
+        user_audio_url, user_duration = save_audio_file(
+            client_id=client_id,
+            conv_id=conversation.id,
+            msg_id=user_msg.id,
+            role="user",
+            audio_bytes=raw,
+            extension=ext,
+        )
+        user_msg.audio_url = user_audio_url
+        user_msg.audio_duration = user_duration
+        user_msg.audio_mime = audio.content_type or f"audio/{ext}"
+
         previous = db.query(Message).filter(Message.conversation_id == conversation.id).order_by(Message.id.asc()).all()
         history = [{"role": m.role, "text": m.text} for m in previous]
         memories = db.query(Memory).filter(Memory.client_id == client_id).all()
         response = generate_response(client_id, c, p, memories, history, transcript)
-        db.add(Message(conversation_id=conversation.id, role="user", text=transcript))
-        db.add(Message(conversation_id=conversation.id, role="assistant", text=response))
-        db.commit()
+
         audio_bytes, mime = synthesize_voice(response, p.voice_id)
-        return {"conversation_id": conversation.id, "transcript": transcript, "response": response, "audio_base64": base64.b64encode(audio_bytes).decode(), "mime_type": mime}
+
+        asst_ext = "mp3" if "mp3" in (mime or "") else "wav"
+        asst_msg = Message(conversation_id=conversation.id, role="assistant", text=response)
+        db.add(asst_msg)
+        db.flush()
+
+        asst_audio_url, asst_duration = save_audio_file(
+            client_id=client_id,
+            conv_id=conversation.id,
+            msg_id=asst_msg.id,
+            role="assistant",
+            audio_bytes=audio_bytes,
+            extension=asst_ext,
+        )
+        asst_msg.audio_url = asst_audio_url
+        asst_msg.audio_duration = asst_duration
+        asst_msg.audio_mime = mime
+
+        update_conversation_metadata(
+            conv_id=conversation.id,
+            db=db,
+            user_query=transcript,
+            channel="voice_http",
+        )
+        db.commit()
+
+        return {
+            "conversation_id": conversation.id,
+            "transcript": transcript,
+            "response": response,
+            "audio_base64": base64.b64encode(audio_bytes).decode(),
+            "mime_type": mime,
+            "user_audio_url": user_audio_url,
+            "assistant_audio_url": asst_audio_url,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -697,3 +773,110 @@ async def voice_turn(client_id: int, audio: UploadFile = File(...), conversation
         import traceback
         traceback.print_exc()
         raise HTTPException(502, f"Voice processing error: {str(e)}")
+
+
+@app.get("/api/clients/{client_id}/conversations", dependencies=[Depends(require_admin)])
+def list_client_conversations(client_id: int, db: Session = Depends(get_db)):
+    c = db.get(Client, client_id)
+    if not c:
+        raise HTTPException(404, "Client not found")
+    convs = (
+        db.query(Conversation)
+        .filter(Conversation.client_id == client_id)
+        .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+        .all()
+    )
+    result = []
+    for conv in convs:
+        msg_count = db.query(Message).filter(Message.conversation_id == conv.id).count()
+        result.append({
+            "id": conv.id,
+            "client_id": conv.client_id,
+            "title": conv.title or f"Conversation #{conv.id}",
+            "summary": conv.summary or "",
+            "channel": conv.channel or "voice",
+            "duration_seconds": round(conv.duration_seconds or 0.0, 1),
+            "message_count": msg_count,
+            "created_at": conv.created_at.isoformat() if conv.created_at else None,
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+        })
+    return result
+
+
+@app.get("/api/clients/{client_id}/conversations/{conversation_id}", dependencies=[Depends(require_admin)])
+def get_client_conversation(client_id: int, conversation_id: int, db: Session = Depends(get_db)):
+    conv = db.get(Conversation, conversation_id)
+    if not conv or conv.client_id != client_id:
+        raise HTTPException(404, "Conversation not found")
+    messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.id.asc())
+        .all()
+    )
+    return {
+        "id": conv.id,
+        "client_id": conv.client_id,
+        "title": conv.title or f"Conversation #{conv.id}",
+        "summary": conv.summary or "",
+        "channel": conv.channel or "voice",
+        "duration_seconds": round(conv.duration_seconds or 0.0, 1),
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "text": m.text,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "audio_url": m.audio_url,
+                "audio_duration": round(m.audio_duration, 1) if m.audio_duration else None,
+                "audio_mime": m.audio_mime,
+            }
+            for m in messages
+        ],
+    }
+
+
+@app.delete("/api/clients/{client_id}/conversations/{conversation_id}", dependencies=[Depends(require_admin)])
+def delete_client_conversation(client_id: int, conversation_id: int, db: Session = Depends(get_db)):
+    conv = db.get(Conversation, conversation_id)
+    if not conv or conv.client_id != client_id:
+        raise HTTPException(404, "Conversation not found")
+    # Delete recording files on disk if any
+    conv_dir = RECORDINGS_DIR / f"client_{client_id}" / f"conv_{conversation_id}"
+    if conv_dir.exists():
+        import shutil
+        shutil.rmtree(conv_dir, ignore_errors=True)
+    
+    db.query(Message).filter(Message.conversation_id == conversation_id).delete()
+    db.delete(conv)
+    db.commit()
+    return {"ok": True, "deleted_conversation_id": conversation_id}
+
+
+@app.get("/api/clients/{client_id}/conversations/{conversation_id}/audio", dependencies=[Depends(require_admin)])
+def download_conversation_audio(client_id: int, conversation_id: int, db: Session = Depends(get_db)):
+    conv = db.get(Conversation, conversation_id)
+    if not conv or conv.client_id != client_id:
+        raise HTTPException(404, "Conversation not found")
+    
+    wav_bytes, filename = get_concatenated_call_audio(client_id, conversation_id, db)
+    if not wav_bytes:
+        raise HTTPException(404, "No audio recordings available for this conversation")
+    
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(wav_bytes)),
+        },
+    )
+
+
+@app.websocket("/api/clients/{client_id}/voice/realtime")
+async def voice_realtime_websocket(websocket: WebSocket, client_id: int):
+    from .realtime_voice import handle_realtime_voice_websocket
+    await handle_realtime_voice_websocket(websocket, client_id)
+

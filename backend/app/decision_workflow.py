@@ -98,8 +98,28 @@ class DecisionState(TypedDict, total=False):
 
 
 def check_is_greeting(text: str) -> bool:
-    clean = text.strip()
-    return bool(GREETING_PATTERN.match(clean))
+    clean = text.strip().lower()
+    clean_alpha = re.sub(r"[^\w\s\u0980-\u09FF]", " ", clean).strip()
+    words = clean_alpha.split()
+    if not words or len(words) > 8:
+        return False
+
+    greeting_words = {
+        "hi", "hello", "hey", "greetings", "howdy", "good",
+        "হায়", "হ্যালো", "হাই", "নমস্কার", "সালাম"
+    }
+    if words[0] in greeting_words:
+        filler = {
+            "there", "everyone", "shaun", "shawn", "koushik", "song", "sawan", "son",
+            "sir", "mr", "morning", "afternoon", "evening", "day", "how", "are",
+            "you", "can", "hear", "me", "to", "you", "doing", "speaking",
+            "কেমন", "আছো", "আছেন", "শৌন", "কৌশিক"
+        }
+        remaining = [w for w in words[1:] if w not in filler]
+        if len(remaining) == 0:
+            return True
+
+    return bool(GREETING_PATTERN.match(text.strip()))
 
 
 def retrieve_node(state: DecisionState) -> DecisionState:
@@ -180,6 +200,44 @@ def retrieve_node(state: DecisionState) -> DecisionState:
     except Exception as e:
         print(f"Relational retrieval error: {e}")
 
+    # 4b. Detect meta-queries about stored documents or records
+    client = state.get("client")
+    exec_name = client.executive_name if client else "the executive"
+    meta_phrases = [
+        "how many document", "how much document", "what document", "how many record",
+        "how much record", "what record", "documents right now", "record right now",
+        "records right now", "record is there", "documents are there", "what is saved in db",
+        "what is in the db", "what is stored", "list documents", "list records", "tell how many"
+    ]
+    if any(phrase in user_text.lower() for phrase in meta_phrases):
+        try:
+            db_meta = SessionLocal()
+            try:
+                from .models import KnowledgeChunk, Memory as DBMemory
+                c_chunks = db_meta.query(KnowledgeChunk).filter(KnowledgeChunk.client_id == client_id).all()
+                chunk_count = len(c_chunks)
+                sources = sorted(list(set(c.source_name for c in c_chunks if getattr(c, "source_name", None))))
+                c_mems = db_meta.query(DBMemory).filter(DBMemory.client_id == client_id).all()
+                mem_count = len(c_mems)
+                mem_titles = [m.title for m in c_mems]
+
+                sources_str = ", ".join(sources) if sources else "verified playbook files"
+                sample_titles = ", ".join(mem_titles[:4]) if mem_titles else "core policies"
+
+                profile_records.append({
+                    "type": "database_summary",
+                    "title": f"Verified Database Records for {exec_name}",
+                    "details": (
+                        f"{exec_name}'s database currently stores {chunk_count} verified knowledge document chunks "
+                        f"from {sources_str}, and {mem_count} approved operational memories "
+                        f"including {sample_titles}."
+                    )
+                })
+            finally:
+                db_meta.close()
+        except Exception as meta_err:
+            print(f"Meta retrieval error: {meta_err}")
+
     # 5. Check if query matches fundamental executive profile fields
     profile = state.get("profile")
     profile_relevant = False
@@ -188,8 +246,18 @@ def retrieve_node(state: DecisionState) -> DecisionState:
         if any(token in profile_content for token in query_tokens if len(token) >= 5):
             profile_relevant = True
 
+    # 5b. Check verified memories
+    memory_items = state.get("memories", [])
+    memory_matches = False
+    if memory_items and query_tokens:
+        for m in memory_items:
+            m_text = f"{m.category} {m.title} {m.content}".lower()
+            if any(token in m_text for token in query_tokens if len(token) >= 4):
+                memory_matches = True
+                break
+
     # 6. Evaluate Evidence Gate
-    has_evidence = bool(vector_memories or graph_memories or profile_records or profile_relevant)
+    has_evidence = bool(vector_memories or graph_memories or profile_records or profile_relevant or memory_matches)
 
     return {
         "is_pure_greeting": False,
@@ -343,13 +411,20 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
     model_name = settings.llm_model.lower()
     is_reasoning_model = any(k in model_name for k in ["o1", "o3", "gpt-5"])
 
+    # Calculate token budget:
+    # Reasoning models (gpt-5, o1, o3) spend 200-400 tokens on internal reasoning before producing output.
+    base_output_tokens = mode_config["max_tokens"]
+    effective_max_tokens = (base_output_tokens + 800) if is_reasoning_model else base_output_tokens
+
     call_kwargs: dict[str, Any] = {
         "model": settings.llm_model,
         "messages": messages,
-        "max_completion_tokens": mode_config["max_tokens"],
+        "max_completion_tokens": effective_max_tokens,
     }
     if not is_reasoning_model:
         call_kwargs["temperature"] = 0.1
+    else:
+        call_kwargs["reasoning_effort"] = "low"
 
     try:
         result = llm.chat.completions.create(**call_kwargs)
@@ -360,9 +435,24 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
             "messages": messages,
         }
         if "max_completion_tokens" in str(e).lower():
-            fallback_kwargs["max_tokens"] = mode_config["max_tokens"]
+            fallback_kwargs["max_tokens"] = effective_max_tokens
         result = llm.chat.completions.create(**fallback_kwargs)
         raw_text = result.choices[0].message.content or ""
+
+    if not raw_text.strip():
+        # Fallback if reasoning model depleted tokens
+        try:
+            retry_res = llm.chat.completions.create(
+                model=settings.llm_model,
+                messages=messages,
+                max_completion_tokens=1200
+            )
+            raw_text = retry_res.choices[0].message.content or ""
+        except Exception:
+            pass
+
+    if not raw_text.strip():
+        raw_text = f"I am the digital representative for {client.executive_name}. Based on our recorded database, please restate your question."
 
     return {"response": raw_text.strip()}
 
@@ -370,6 +460,10 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
 def sanitize_response_node(state: DecisionState) -> DecisionState:
     """Strips accidental conversational filler and pleasantries from the generated response."""
     text = state.get("response", "").strip()
+
+    # Normalize special unicode punctuation for clean TTS and display
+    text = text.replace("\u2011", "-").replace("\u2012", "-").replace("\u2013", "-").replace("\u2014", " - ")
+    text = text.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
 
     # Strip conversational chatter patterns
     for pattern in CHATTER_PATTERNS:

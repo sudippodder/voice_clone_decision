@@ -5,6 +5,30 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY || 'change-this-admin-key';
 
+function pcmToWavBlob(pcmBytes: Uint8Array, sampleRate = 24000): Blob {
+  const wavHeader = new ArrayBuffer(44);
+  const view = new DataView(wavHeader);
+  // "RIFF"
+  view.setUint32(0, 0x52494646, false);
+  view.setUint32(4, 36 + pcmBytes.length, true);
+  // "WAVE"
+  view.setUint32(8, 0x57415645, false);
+  // "fmt "
+  view.setUint32(12, 0x666d7420, false);
+  view.setUint32(16, 16, true); // Linear PCM subchunk length
+  view.setUint16(20, 1, true); // 1 = PCM format
+  view.setUint16(22, 1, true); // 1 channel (mono)
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // Byte rate (sampleRate * 1 channel * 2 bytes/sample)
+  view.setUint16(32, 2, true); // Block align (1 channel * 2 bytes)
+  view.setUint16(34, 16, true); // 16 bits per sample
+  // "data"
+  view.setUint32(36, 0x64617461, false);
+  view.setUint32(40, pcmBytes.length, true);
+
+  return new Blob([wavHeader, pcmBytes as unknown as BlobPart], { type: 'audio/wav' });
+}
+
 export function VoiceAgent({ data }: { data: any }) {
   const [recording, setRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -18,7 +42,10 @@ export function VoiceAgent({ data }: { data: any }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
   const [lastAudioUrl, setLastAudioUrl] = useState<string | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [textInput, setTextInput] = useState('');
 
+  // Audio recording refs
   const mediaRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunks = useRef<Blob[]>([]);
@@ -26,17 +53,147 @@ export function VoiceAgent({ data }: { data: any }) {
   const timerRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Cleanup on unmount
+  // WebSocket & Web Audio Streaming Queue refs
+  const wsRef = useRef<WebSocket | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioQueueRef = useRef<AudioBufferSourceNode[]>([]);
+  const nextStartTimeRef = useRef<number>(0);
+  const receivedPcmChunksRef = useRef<Uint8Array[]>([]);
+  const playedAnyPcmRef = useRef<boolean>(false);
+  const recognitionRef = useRef<any>(null);
+  const isAgentSpeakingRef = useRef<boolean>(false);
+  const transcriptRef = useRef<string>('');
+
+  useEffect(() => {
+    isAgentSpeakingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  function ensureAudioContext(): AudioContext {
+    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtxRef.current = new AudioCtx({ sampleRate: 24000 });
+    }
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {});
+    }
+    return audioCtxRef.current;
+  }
+
+  // --- REAL-TIME WEBSOCKET MANAGEMENT ---
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+
+    try {
+      const base = API.replace(/^http/, 'ws');
+      const wsUrl = `${base}/api/clients/${data.client.id}/voice/realtime`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setWsConnected(true);
+      };
+
+      ws.onmessage = async (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+
+          if (msg.type === 'session_started') {
+            setWsConnected(true);
+          } else if (msg.type === 'user_transcript') {
+            setTranscript(msg.text || '');
+            transcriptRef.current = msg.text || '';
+          } else if (msg.type === 'agent_thinking') {
+            setBusy(true);
+            setBusyStep('Executive reasoning from database records…');
+          } else if (msg.type === 'agent_text_chunk') {
+            setBusy(false);
+            setResponse((prev) => (prev ? prev + ' ' + msg.text : msg.text));
+          } else if (msg.type === 'audio_chunk') {
+            setBusy(false);
+            if (msg.audio_base64) {
+              await queueAudioChunk(
+                msg.audio_base64,
+                msg.mime_type || 'audio/pcm',
+                msg.sample_rate || 24000
+              );
+            }
+          } else if (msg.type === 'agent_turn_finished') {
+            setBusy(false);
+            setBusyStep('');
+            if (msg.conversation_id) setConversationId(msg.conversation_id);
+
+            // Assemble complete PCM buffer into standard playable WAV blob for replay
+            if (receivedPcmChunksRef.current.length > 0) {
+              const totalBytes = receivedPcmChunksRef.current.reduce((acc, c) => acc + c.length, 0);
+              const merged = new Uint8Array(totalBytes);
+              let offset = 0;
+              for (const chunk of receivedPcmChunksRef.current) {
+                merged.set(chunk, offset);
+                offset += chunk.length;
+              }
+              const wavBlob = pcmToWavBlob(merged, 24000);
+              const fullUrl = URL.createObjectURL(wavBlob);
+              setLastAudioUrl(fullUrl);
+
+              // Auto-play fallback if Web Audio queue was blocked by browser policy
+              if (!playedAnyPcmRef.current) {
+                stopAudioInternal();
+                const fallbackAudio = new Audio(fullUrl);
+                audioRef.current = fallbackAudio;
+                fallbackAudio.onplay = () => {
+                  setIsPlaying(true);
+                  setIsPlaybackPaused(false);
+                };
+                fallbackAudio.onended = () => {
+                  setIsPlaying(false);
+                };
+                fallbackAudio.play().catch(() => {});
+              }
+            }
+          } else if (msg.type === 'interrupted') {
+            stopAudioInternal();
+            setBusy(false);
+            setBusyStep('');
+          } else if (msg.type === 'error') {
+            setError(msg.message || 'Real-time voice error');
+            setBusy(false);
+            setBusyStep('');
+          }
+        } catch (e) {
+          console.error('Error handling WebSocket message:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        setWsConnected(false);
+      };
+
+      ws.onerror = () => {
+        setWsConnected(false);
+      };
+    } catch (e) {
+      console.warn('WebSocket connection not initialized:', e);
+      setWsConnected(false);
+    }
+  }, [data.client.id]);
+
+  useEffect(() => {
+    connectWebSocket();
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [connectWebSocket]);
+
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
+      stopAudioInternal();
     };
   }, []);
 
@@ -63,18 +220,182 @@ export function VoiceAgent({ data }: { data: any }) {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
 
-  // --- RECORDING CONTROLS ---
+  // --- RAW PCM WEB AUDIO API STREAMING QUEUE ---
+  async function queueAudioChunk(base64: string, mime: string, sampleRate = 24000) {
+    if (mime === 'audio/pcm' || sampleRate) {
+      try {
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
 
+        // Store PCM bytes for replay WAV assembly
+        receivedPcmChunksRef.current.push(bytes);
+
+        const ctx = ensureAudioContext();
+        const numSamples = Math.floor(bytes.length / 2);
+        const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, numSamples);
+        const float32 = new Float32Array(numSamples);
+        for (let i = 0; i < numSamples; i++) {
+          float32[i] = int16[i] / 32768.0;
+        }
+
+        const audioBuffer = ctx.createBuffer(1, float32.length, sampleRate);
+        audioBuffer.getChannelData(0).set(float32);
+
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+
+        const currentTime = ctx.currentTime;
+        if (nextStartTimeRef.current < currentTime) {
+          nextStartTimeRef.current = currentTime + 0.03; // 30ms jitter buffer
+        }
+
+        source.start(nextStartTimeRef.current);
+        nextStartTimeRef.current += audioBuffer.duration;
+        audioQueueRef.current.push(source);
+
+        playedAnyPcmRef.current = true;
+        setIsPlaying(true);
+        setIsPlaybackPaused(false);
+
+        source.onended = () => {
+          const idx = audioQueueRef.current.indexOf(source);
+          if (idx !== -1) audioQueueRef.current.splice(idx, 1);
+          if (audioQueueRef.current.length === 0) {
+            setIsPlaying(false);
+          }
+        };
+      } catch (pcmErr) {
+        console.warn('PCM streaming audio chunk error:', pcmErr);
+      }
+    } else if (mime.startsWith('audio/mpeg') || mime.startsWith('audio/mp3')) {
+      try {
+        const audioUrl = `data:${mime};base64,${base64}`;
+        setLastAudioUrl(audioUrl);
+        stopAudioInternal();
+        const audio = new Audio(audioUrl);
+        audioRef.current = audio;
+        audio.onplay = () => {
+          setIsPlaying(true);
+          setIsPlaybackPaused(false);
+        };
+        audio.onended = () => setIsPlaying(false);
+        audio.play().catch(() => {});
+      } catch (mp3Err) {
+        console.warn('Batch MP3 playback error:', mp3Err);
+      }
+    }
+  }
+
+  // --- BARGE-IN & INTERRUPTION ---
+  function stopAudioInternal() {
+    audioQueueRef.current.forEach((source) => {
+      try {
+        source.stop();
+        source.disconnect();
+      } catch (e) {}
+    });
+    audioQueueRef.current = [];
+
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      nextStartTimeRef.current = audioCtxRef.current.currentTime;
+    }
+
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+
+    setIsPlaying(false);
+    setIsPlaybackPaused(false);
+  }
+
+  const stopAudio = useCallback(() => {
+    stopAudioInternal();
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'interrupt' }));
+    }
+  }, []);
+
+  function pauseAudio() {
+    if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
+      audioCtxRef.current.suspend();
+      setIsPlaybackPaused(true);
+      setIsPlaying(false);
+    } else if (audioRef.current && !audioRef.current.paused) {
+      audioRef.current.pause();
+      setIsPlaybackPaused(true);
+      setIsPlaying(false);
+    }
+  }
+
+  function resumeAudio() {
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+      setIsPlaybackPaused(false);
+      setIsPlaying(true);
+    } else if (audioRef.current && audioRef.current.paused) {
+      audioRef.current.play().catch(() => {});
+      setIsPlaybackPaused(false);
+      setIsPlaying(true);
+    }
+  }
+
+  function replayAudio() {
+    if (!lastAudioUrl) return;
+    stopAudioInternal();
+
+    const audio = new Audio(lastAudioUrl);
+    audioRef.current = audio;
+    audio.onplay = () => {
+      setIsPlaying(true);
+      setIsPlaybackPaused(false);
+    };
+    audio.onpause = () => {
+      if (audio.currentTime < audio.duration) {
+        setIsPlaybackPaused(true);
+        setIsPlaying(false);
+      }
+    };
+    audio.onended = () => {
+      setIsPlaying(false);
+      setIsPlaybackPaused(false);
+    };
+    audio.onerror = () => {
+      setIsPlaying(false);
+      setIsPlaybackPaused(false);
+    };
+    audio.play().catch(() => {});
+  }
+
+  // --- RECORDING & STREAMING CONTROLS ---
   async function startRecording() {
     setError('');
     setTranscript('');
+    transcriptRef.current = '';
     setResponse('');
     setRecordSeconds(0);
     setIsPaused(false);
     shouldSendRef.current = true;
+    receivedPcmChunksRef.current = [];
+    playedAnyPcmRef.current = false;
 
-    // Stop any existing agent audio
-    stopAudio();
+    // Direct user gesture initializes Web Audio Context to bypass autoplay restrictions
+    ensureAudioContext();
+
+    if (isAgentSpeakingRef.current) {
+      stopAudio();
+    } else {
+      stopAudioInternal();
+    }
+
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      connectWebSocket();
+    }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -87,23 +408,57 @@ export function VoiceAgent({ data }: { data: any }) {
         if (e.data.size) chunks.current.push(e.data);
       };
 
+      // Set up browser SpeechRecognition if supported
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        try {
+          const rec = new SpeechRecognition();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = data.profile?.preferred_language === 'Bengali' ? 'bn-BD' : 'en-US';
+
+          rec.onresult = (evt: any) => {
+            let liveTranscript = '';
+            for (let i = 0; i < evt.results.length; i++) {
+              liveTranscript += evt.results[i][0].transcript;
+            }
+            if (liveTranscript) {
+              setTranscript(liveTranscript);
+              transcriptRef.current = liveTranscript;
+            }
+          };
+
+          rec.onerror = (recErr: any) => {
+            console.warn('SpeechRecognition event warning:', recErr);
+          };
+
+          rec.start();
+          recognitionRef.current = rec;
+        } catch (recErr) {
+          console.warn('Browser SpeechRecognition not active:', recErr);
+        }
+      }
+
       mr.onstop = async () => {
         if (streamRef.current) {
           streamRef.current.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
         }
 
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.stop();
+          } catch (e) {}
+          recognitionRef.current = null;
+        }
+
         if (shouldSendRef.current && chunks.current.length > 0) {
           const blob = new Blob(chunks.current, { type: mr.mimeType || 'audio/webm' });
-          if (blob.size > 0) {
-            await sendAudio(blob);
-          } else {
-            setError('No audio recorded. Please try speaking again.');
-          }
+          await submitTurn(blob);
         }
       };
 
-      mr.start(250); // Emit chunks every 250ms for smooth buffering
+      mr.start(250);
       setRecording(true);
     } catch (e: any) {
       setError(e.message || 'Microphone access denied or audio device not found.');
@@ -139,72 +494,70 @@ export function VoiceAgent({ data }: { data: any }) {
     if (mediaRef.current && mediaRef.current.state !== 'inactive') {
       mediaRef.current.stop();
     }
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+      recognitionRef.current = null;
+    }
     setRecording(false);
     setIsPaused(false);
     chunks.current = [];
     setRecordSeconds(0);
   }
 
-  // --- PLAYBACK CONTROLS ---
-
-  const stopAudio = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
-    setIsPlaying(false);
-    setIsPlaybackPaused(false);
-  }, []);
-
-  function pauseAudio() {
-    if (audioRef.current && !audioRef.current.paused) {
-      audioRef.current.pause();
-      setIsPlaybackPaused(true);
-      setIsPlaying(false);
-    }
-  }
-
-  function resumeAudio() {
-    if (audioRef.current && audioRef.current.paused) {
-      audioRef.current.play().catch(() => {});
-      setIsPlaybackPaused(false);
-      setIsPlaying(true);
-    }
-  }
-
-  function replayAudio() {
-    if (!lastAudioUrl) return;
-    stopAudio();
-    const audio = new Audio(lastAudioUrl);
-    audioRef.current = audio;
-    audio.onplay = () => {
-      setIsPlaying(true);
-      setIsPlaybackPaused(false);
-    };
-    audio.onpause = () => {
-      if (audio.currentTime < audio.duration) {
-        setIsPlaybackPaused(true);
-        setIsPlaying(false);
-      }
-    };
-    audio.onended = () => {
-      setIsPlaying(false);
-      setIsPlaybackPaused(false);
-    };
-    audio.onerror = () => {
-      setIsPlaying(false);
-      setIsPlaybackPaused(false);
-    };
-    audio.play().catch(() => {});
-  }
-
-  // --- API CALL ---
-
-  async function sendAudio(blob: Blob) {
+  // --- SUBMIT TURN (STREAMING WEBSOCKET WITH HTTP FALLBACK) ---
+  async function submitTurn(blob: Blob) {
     setBusy(true);
-    setBusyStep('Transcribing your speech and evaluating response…');
+    setBusyStep('Connecting to real-time decision stream…');
 
+    // Priority 1: Fast WebSocket Streaming Path
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      if (blob.size < 1000) {
+        setError('Recording was too short or silent. Please speak clearly for at least 1-2 seconds.');
+        setBusy(false);
+        setBusyStep('');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64Audio = (reader.result as string).split(',')[1];
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          const liveText = transcriptRef.current.trim();
+          if (liveText) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'user_transcription',
+                text: liveText,
+                audio_base64: base64Audio,
+                filename: 'voice.webm',
+                conversation_id: conversationId,
+              })
+            );
+          } else {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'audio_turn',
+                audio_base64: base64Audio,
+                filename: 'voice.webm',
+                conversation_id: conversationId,
+              })
+            );
+          }
+        }
+      };
+      reader.readAsDataURL(blob);
+      return;
+    }
+
+    // Priority 2: HTTP Fallback if WebSocket is disconnected
     try {
+      setBusyStep('Processing turn via HTTP fallback…');
+      if (blob.size < 1000) {
+        throw new Error('Recording was too short or silent. Please speak clearly for at least 1-2 seconds.');
+      }
+
       const fd = new FormData();
       fd.append('audio', blob, 'voice.webm');
       if (conversationId) fd.append('conversation_id', String(conversationId));
@@ -216,43 +569,20 @@ export function VoiceAgent({ data }: { data: any }) {
       });
 
       const j = await r.json().catch(() => ({}));
-
-      if (!r.ok) {
-        throw new Error(j.detail || 'Voice turn request failed');
-      }
+      if (!r.ok) throw new Error(j.detail || 'Voice turn request failed');
 
       setConversationId(j.conversation_id);
       setTranscript(j.transcript || '');
       setResponse(j.response || '');
 
       if (j.audio_base64) {
-        setBusyStep('Playing synthesized executive voice…');
         const audioUrl = `data:${j.mime_type || 'audio/mpeg'};base64,${j.audio_base64}`;
         setLastAudioUrl(audioUrl);
-
-        stopAudio();
+        stopAudioInternal();
         const audio = new Audio(audioUrl);
         audioRef.current = audio;
-
-        audio.onplay = () => {
-          setIsPlaying(true);
-          setIsPlaybackPaused(false);
-        };
-        audio.onpause = () => {
-          if (audio.currentTime < audio.duration) {
-            setIsPlaybackPaused(true);
-            setIsPlaying(false);
-          }
-        };
-        audio.onended = () => {
-          setIsPlaying(false);
-          setIsPlaybackPaused(false);
-        };
-        audio.onerror = () => {
-          setIsPlaying(false);
-          setIsPlaybackPaused(false);
-        };
-
+        audio.onplay = () => setIsPlaying(true);
+        audio.onended = () => setIsPlaying(false);
         await audio.play().catch(() => {});
       }
     } catch (e: any) {
@@ -261,6 +591,53 @@ export function VoiceAgent({ data }: { data: any }) {
       setBusy(false);
       setBusyStep('');
     }
+  }
+
+  // --- TEXT QUESTION SUBMISSION (TESTING & ACCESSIBILITY) ---
+  async function submitTextQuery(overrideText?: string) {
+    const query = (overrideText ?? textInput).trim();
+    if (!query) return;
+
+    setError('');
+    setTranscript(query);
+    transcriptRef.current = query;
+    setTextInput('');
+    setResponse('');
+    receivedPcmChunksRef.current = [];
+    playedAnyPcmRef.current = false;
+    stopAudioInternal();
+    ensureAudioContext();
+
+    setBusy(true);
+    setBusyStep('Executive reasoning from database records…');
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'user_transcription',
+          text: query,
+          conversation_id: conversationId,
+        })
+      );
+      return;
+    }
+
+    connectWebSocket();
+    setTimeout(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'user_transcription',
+            text: query,
+            conversation_id: conversationId,
+          })
+        );
+      } else {
+        setError('Real-time connection unavailable. Please refresh or retry.');
+        setBusy(false);
+        setBusyStep('');
+      }
+    }, 500);
   }
 
   const isVoiceReady = Boolean(data.profile?.voice_authorized && data.profile?.voice_id);
@@ -282,10 +659,17 @@ export function VoiceAgent({ data }: { data: any }) {
           }`}
         />
 
-        {/* Header Badge */}
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-300 text-xs font-bold tracking-wider uppercase mb-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          DIGITAL EXECUTIVE VOICE AGENT
+        {/* Real-time Streaming Status Badge */}
+        <div className="flex items-center justify-center gap-2 mb-2">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-300 text-xs font-bold tracking-wider uppercase">
+            <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+            {wsConnected ? '⚡ REAL-TIME VOICE STREAMING ACTIVE' : 'DIGITAL EXECUTIVE VOICE AGENT'}
+          </div>
+          {wsConnected && (
+            <span className="text-[11px] font-mono text-emerald-400/90 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
+              PCM 24kHz • &lt;800ms Latency
+            </span>
+          )}
         </div>
 
         <h2 className="text-3xl font-black mt-2 text-white tracking-tight">
@@ -306,7 +690,6 @@ export function VoiceAgent({ data }: { data: any }) {
 
         {/* Central Orb / Pulse Graphic */}
         <div className="relative mx-auto my-8 flex items-center justify-center">
-          {/* Animated concentric ripples when recording */}
           {recording && !isPaused && (
             <>
               <div className="absolute w-44 h-44 rounded-full border border-red-500/30 animate-ping opacity-75" />
@@ -314,7 +697,6 @@ export function VoiceAgent({ data }: { data: any }) {
             </>
           )}
 
-          {/* Animated concentric ripples when AI is speaking */}
           {isPlaying && (
             <>
               <div className="absolute w-44 h-44 rounded-full border border-violet-500/30 animate-ping opacity-75" />
@@ -337,7 +719,6 @@ export function VoiceAgent({ data }: { data: any }) {
               {recording ? (isPaused ? '⏸️' : '🎙️') : isPlaying ? '🔊' : '🎙️'}
             </div>
 
-            {/* Live recording timer badge */}
             {recording && (
               <div
                 className={`mt-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono font-bold tracking-wider ${
@@ -365,23 +746,23 @@ export function VoiceAgent({ data }: { data: any }) {
           ) : busy ? (
             <span className="text-violet-300 flex items-center justify-center gap-2">
               <span className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-              {busyStep || 'Thinking and synthesizing voice response…'}
+              {busyStep || 'Streaming decision reasoning and synthesizing voice…'}
             </span>
           ) : isPlaying ? (
             <span className="text-emerald-300 font-semibold flex items-center justify-center gap-2">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              AI Executive is speaking… Click <em>Pause</em> or <em>Stop</em> anytime.
+              AI Executive is speaking in real time… Click <em>Interrupt</em> anytime to barge in.
             </span>
           ) : isPlaybackPaused ? (
             <span className="text-amber-300">
               ⏸️ Audio speech paused. Click <em>Resume Speech</em> or <em>Stop</em>.
             </span>
           ) : (
-            'Click "Start Talking" and speak to the digital executive representative.'
+            'Click "Start Talking" or type below to speak with the digital executive in real time.'
           )}
         </p>
 
-        {/* Permanent Action Controls Dock (Always Visible) */}
+        {/* Permanent Action Controls Dock */}
         <div className="flex flex-wrap items-center justify-center gap-3 p-3 bg-[#0d1220] rounded-2xl border border-[#232b3e] max-w-xl mx-auto shadow-lg">
           {/* 1. START / RESUME RECORDING */}
           {!recording ? (
@@ -392,7 +773,7 @@ export function VoiceAgent({ data }: { data: any }) {
               disabled={busy || !isVoiceReady}
             >
               <span>🎙️</span>
-              <span>{busy ? 'Processing Turn…' : 'Start Talking'}</span>
+              <span>{busy ? 'Streaming…' : isPlaying ? 'Interrupt & Speak' : 'Start Talking'}</span>
             </button>
           ) : isPaused ? (
             <button
@@ -411,16 +792,14 @@ export function VoiceAgent({ data }: { data: any }) {
             </div>
           )}
 
-          {/* 2. PAUSE BUTTON (Always visible) */}
+          {/* 2. PAUSE BUTTON */}
           <button
             id="btn-pause-action"
             type="button"
             className={`btn flex items-center gap-2 px-5 py-2.5 text-sm font-bold transition ${
               (recording && !isPaused) || isPlaying
                 ? 'btn-secondary text-amber-300 border-amber-500/40 hover:bg-amber-950/30'
-                : isPaused
-                ? 'btn-primary'
-                : isPlaybackPaused
+                : isPaused || isPlaybackPaused
                 ? 'btn-primary'
                 : 'btn-secondary opacity-40 cursor-not-allowed'
             }`}
@@ -431,17 +810,6 @@ export function VoiceAgent({ data }: { data: any }) {
               else if (isPlaybackPaused) resumeAudio();
             }}
             disabled={!recording && !isPlaying && !isPlaybackPaused}
-            title={
-              recording
-                ? isPaused
-                  ? 'Click to resume recording'
-                  : 'Click to pause recording'
-                : isPlaying
-                ? 'Click to pause AI voice response'
-                : isPlaybackPaused
-                ? 'Click to resume AI voice response'
-                : 'Pause (active while recording or listening to AI)'
-            }
           >
             <span>{isPaused || isPlaybackPaused ? '▶️' : '⏸️'}</span>
             <span>
@@ -455,7 +823,7 @@ export function VoiceAgent({ data }: { data: any }) {
             </span>
           </button>
 
-          {/* 3. STOP BUTTON (Always visible) */}
+          {/* 3. STOP / INTERRUPT BUTTON */}
           <button
             id="btn-stop-action"
             type="button"
@@ -471,25 +839,20 @@ export function VoiceAgent({ data }: { data: any }) {
               else if (isPlaying || isPlaybackPaused) stopAudio();
             }}
             disabled={!recording && !isPlaying && !isPlaybackPaused}
-            title={
-              recording
-                ? 'Stop recording and send audio to executive AI'
-                : isPlaying || isPlaybackPaused
-                ? 'Stop AI voice playback'
-                : 'Stop (active while recording or listening to AI)'
-            }
           >
             <span>⏹️</span>
             <span>
               {recording
                 ? 'Stop & Send'
-                : isPlaying || isPlaybackPaused
+                : isPlaying
+                ? 'Interrupt (Barge-In)'
+                : isPlaybackPaused
                 ? 'Stop Speech'
                 : 'Stop'}
             </span>
           </button>
 
-          {/* 4. CANCEL RECORDING (Visible while recording or paused) */}
+          {/* 4. CANCEL RECORDING */}
           {recording && (
             <button
               id="btn-cancel-recording"
@@ -502,7 +865,7 @@ export function VoiceAgent({ data }: { data: any }) {
             </button>
           )}
 
-          {/* 5. REPLAY PREVIOUS RESPONSE (Visible when audio available) */}
+          {/* 5. REPLAY PREVIOUS RESPONSE */}
           {!recording && !isPlaying && !isPlaybackPaused && lastAudioUrl && (
             <button
               id="btn-replay-audio"
@@ -516,6 +879,31 @@ export function VoiceAgent({ data }: { data: any }) {
             </button>
           )}
         </div>
+
+        {/* Quick Text Input Form for immediate testing & accessibility */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitTextQuery();
+          }}
+          className="mt-6 max-w-xl mx-auto flex items-center gap-2"
+        >
+          <input
+            type="text"
+            className="flex-1 bg-[#090d16] border border-[#232b3e] focus:border-violet-500 rounded-xl px-4 py-2 text-sm text-slate-200 placeholder-slate-500 outline-none transition"
+            placeholder={`Ask ${data.client.executive_name} a question (or speak using microphone)...`}
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            disabled={busy || recording}
+          />
+          <button
+            type="submit"
+            className="btn btn-primary px-4 py-2 text-xs font-bold whitespace-nowrap"
+            disabled={busy || recording || !textInput.trim() || !isVoiceReady}
+          >
+            {busy ? '…' : 'Ask'}
+          </button>
+        </form>
 
         {/* Missing Voice Warning Notice */}
         {!isVoiceReady && (
@@ -533,11 +921,18 @@ export function VoiceAgent({ data }: { data: any }) {
           <div className="mt-6 p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-200 text-xs font-semibold text-left flex items-start gap-2.5">
             <span className="text-base leading-none">⚠️</span>
             <span className="flex-1">{error}</span>
+            <button
+              type="button"
+              onClick={() => setError('')}
+              className="text-slate-400 hover:text-white text-xs underline ml-2"
+            >
+              Dismiss
+            </button>
           </div>
         )}
       </div>
 
-      {/* Transcript & AI Response History Cards */}
+      {/* Live Transcript & AI Response Display */}
       {(transcript || response) && (
         <div className="space-y-4 animate-fade-in">
           {/* User Transcript Card */}
@@ -547,6 +942,9 @@ export function VoiceAgent({ data }: { data: any }) {
                 <span className="flex items-center gap-1.5">
                   <span>👤</span> You said
                 </span>
+                {recording && (
+                  <span className="text-[11px] text-red-400 font-mono animate-pulse">● Live Transcribing…</span>
+                )}
               </div>
               <p className="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">
                 {transcript}
@@ -561,36 +959,25 @@ export function VoiceAgent({ data }: { data: any }) {
                 <span className="flex items-center gap-1.5">
                   <span className="text-sm">✦</span> {data.client.executive_name} (AI Twin)
                 </span>
-                {lastAudioUrl && (
-                  <div className="flex items-center gap-2">
-                    {isPlaying ? (
-                      <button
-                        type="button"
-                        onClick={pauseAudio}
-                        className="text-[11px] text-amber-300 hover:text-amber-200 flex items-center gap-1 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/30"
-                      >
-                        <span>⏸️</span> Pause
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={replayAudio}
-                        className="text-[11px] text-violet-300 hover:text-white flex items-center gap-1 bg-violet-950/40 px-2 py-0.5 rounded border border-violet-500/30"
-                      >
-                        <span>▶️</span> {isPlaybackPaused ? 'Resume' : 'Play Audio'}
-                      </button>
-                    )}
-                    {(isPlaying || isPlaybackPaused) && (
-                      <button
-                        type="button"
-                        onClick={stopAudio}
-                        className="text-[11px] text-red-300 hover:text-white flex items-center gap-1 bg-red-950/40 px-2 py-0.5 rounded border border-red-500/30"
-                      >
-                        <span>⏹️</span> Stop
-                      </button>
-                    )}
-                  </div>
-                )}
+                <div className="flex items-center gap-2">
+                  {isPlaying ? (
+                    <button
+                      type="button"
+                      onClick={stopAudio}
+                      className="text-[11px] text-red-300 hover:text-white flex items-center gap-1 bg-red-950/40 px-2 py-0.5 rounded border border-red-500/30"
+                    >
+                      <span>⏹️</span> Interrupt
+                    </button>
+                  ) : lastAudioUrl ? (
+                    <button
+                      type="button"
+                      onClick={replayAudio}
+                      className="text-[11px] text-violet-300 hover:text-white flex items-center gap-1 bg-violet-950/40 px-2 py-0.5 rounded border border-violet-500/30"
+                    >
+                      <span>▶️</span> Replay
+                    </button>
+                  ) : null}
+                </div>
               </div>
               <p className="text-slate-100 text-sm leading-7 whitespace-pre-wrap font-normal">
                 {response}

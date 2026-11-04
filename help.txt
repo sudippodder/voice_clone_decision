@@ -60,3 +60,45 @@ NEO4J_URI=bolt://127.0.0.1:7687
 
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
+
+
+
+
+
+
+
+
+
+
+Current System (Turn-Based HTTP):
+Records full audio blob 
+→
+→ HTTP upload to main.py 
+→
+→ Whisper batch transcription 
+→
+→ Full LangGraph completion 
+→
+→ ElevenLabs batch MP3 synthesis 
+→
+→ Base64 decode in VoiceAgent.tsx.
+Latency: 5,000ms – 7,000ms (5 to 7 seconds). No natural interruption (barge-in).
+Target Real-Time System (Full-Duplex Streaming):
+Live microphone stream over WebSocket 
+→
+→ Real-time STT 
+→
+→ Streamed database-grounded decision tokens 
+→
+→ First sentence piped into ElevenLabs Streaming WebSocket 
+→
+→ Audio chunks decoded immediately by Web Audio API while the model is still generating.
+Latency: 600ms – 900ms (sub-second Time-to-First-Audio). Full Barge-in / Interruption support.
+
+
+
+
+
+
+Username: admin
+Password: pass123

@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import json
 from pgvector.sqlalchemy import Vector as _PgVector
@@ -47,6 +47,7 @@ class Client(Base):
     profile = relationship("ExecutiveProfile", back_populates="client", uselist=False, cascade="all, delete-orphan")
     memories = relationship("Memory", back_populates="client", cascade="all, delete-orphan")
     voice_clones = relationship("VoiceClone", back_populates="client", cascade="all, delete-orphan")
+    conversations = relationship("Conversation", back_populates="client", cascade="all, delete-orphan", order_by="Conversation.id.desc()")
 
 class ExecutiveProfile(Base):
     __tablename__ = "executive_profiles"
@@ -98,16 +99,29 @@ class Memory(Base):
 class Conversation(Base):
     __tablename__ = "conversations"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), default="Voice Conversation")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    channel: Mapped[str] = mapped_column(String(50), default="voice_realtime")
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    client = relationship("Client", back_populates="conversations")
+    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan", order_by="Message.id.asc()")
 
 class Message(Base):
     __tablename__ = "messages"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), nullable=False)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(30), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    audio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    audio_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_mime: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    conversation = relationship("Conversation", back_populates="messages")
 
 
 class KnowledgeChunk(Base):

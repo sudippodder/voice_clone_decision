@@ -7,14 +7,17 @@ from openai import OpenAI
 from .config import settings
 
 
-def transcribe_audio(audio: bytes, filename: str = "audio.webm") -> str:
+def transcribe_audio(audio: bytes, filename: str = "audio.webm", client_name: str = "") -> str:
+    if not audio or len(audio) < 1000:
+        return ""
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     f = io.BytesIO(audio)
     f.name = filename
-    result = client.audio.transcriptions.create(model="whisper-1", file=f)
-    return result.text
+    exec_prompt = f"Executive voice agent for Shaun, Koushik, {client_name}. Virtual Employee, hiring funnel triad, trial, interview, playbook."
+    result = client.audio.transcriptions.create(model="whisper-1", file=f, prompt=exec_prompt)
+    return result.text or ""
 
 
 def build_system_prompt(client, profile, memories) -> str:
