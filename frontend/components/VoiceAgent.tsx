@@ -563,10 +563,10 @@ export function VoiceAgent({ data }: { data: any }) {
     setBusyStep('Connecting to real-time decision stream…');
 
     // If WebSocket is currently establishing connection, wait briefly
-    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
+    if (wsRef.current && (wsRef.current.readyState as number) === WebSocket.CONNECTING) {
       for (let i = 0; i < 4; i++) {
         await new Promise((r) => setTimeout(r, 100));
-        if (wsRef.current?.readyState === WebSocket.OPEN) break;
+        if ((wsRef.current?.readyState as number) === WebSocket.OPEN) break;
       }
     }
 
