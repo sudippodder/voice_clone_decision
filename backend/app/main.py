@@ -22,9 +22,7 @@ from fastapi.responses import Response
 
 app = FastAPI(title="Executive Voice Agent API", version="0.1.0")
 
-recordings_dir = Path("backend/recordings") if Path("backend").exists() else Path("recordings")
-recordings_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/recordings", StaticFiles(directory=str(recordings_dir)), name="recordings")
+app.mount("/recordings", StaticFiles(directory=str(RECORDINGS_DIR)), name="recordings")
 #app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(
     CORSMiddleware,

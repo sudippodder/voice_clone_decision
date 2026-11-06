@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from .models import Conversation, Message
 
-RECORDINGS_DIR = Path("backend/recordings")
+RECORDINGS_DIR = (Path(__file__).resolve().parent.parent / "recordings").resolve()
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
