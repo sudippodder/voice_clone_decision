@@ -98,11 +98,13 @@ export function VoiceAgent({ data }: { data: any }) {
     try {
       const base = getWsUrl();
       const wsUrl = `${base}/api/clients/${data.client.id}/voice/realtime`;
+      console.log('[VoiceAgent] Connecting WebSocket to:', wsUrl);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         if (wsRef.current !== ws) return;
+        console.log('[VoiceAgent] WebSocket connected successfully to:', wsUrl);
         setWsConnected(true);
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
@@ -187,6 +189,7 @@ export function VoiceAgent({ data }: { data: any }) {
       };
 
       ws.onclose = (evt) => {
+        console.log('[VoiceAgent] WebSocket closed with code:', evt.code, evt.reason);
         if (wsRef.current === ws) {
           wsRef.current = null;
           setWsConnected(false);
@@ -201,7 +204,8 @@ export function VoiceAgent({ data }: { data: any }) {
         }
       };
 
-      ws.onerror = () => {
+      ws.onerror = (err) => {
+        console.warn('[VoiceAgent] WebSocket error on:', wsUrl, err);
         if (wsRef.current === ws) {
           setWsConnected(false);
         }
@@ -717,14 +721,25 @@ export function VoiceAgent({ data }: { data: any }) {
         />
 
         {/* Real-time Streaming Status Badge */}
-        <div className="flex items-center justify-center gap-2 mb-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-300 text-xs font-bold tracking-wider uppercase">
+        <div className="flex items-center justify-center gap-2 mb-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => {
+              if (!wsConnected) connectWebSocket();
+            }}
+            title={wsConnected ? 'Real-time WebSocket streaming connected' : 'Click to connect real-time stream'}
+            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-300 text-xs font-bold tracking-wider uppercase transition-colors hover:bg-violet-500/20 cursor-pointer"
+          >
             <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-            {wsConnected ? '⚡ REAL-TIME VOICE STREAMING ACTIVE' : 'DIGITAL EXECUTIVE VOICE AGENT'}
-          </div>
-          {wsConnected && (
+            {wsConnected ? '⚡ REAL-TIME VOICE STREAMING ACTIVE' : 'DIGITAL EXECUTIVE VOICE AGENT (CONNECT)'}
+          </button>
+          {wsConnected ? (
             <span className="text-[11px] font-mono text-emerald-400/90 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
               PCM 24kHz • &lt;800ms Latency
+            </span>
+          ) : (
+            <span className="text-[11px] font-mono text-amber-400/80 bg-amber-950/30 px-2 py-0.5 rounded border border-amber-500/20">
+              HTTP Fallback Active
             </span>
           )}
         </div>
