@@ -338,23 +338,41 @@ async def stream_elevenlabs_tts(
 async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
     """Main WebSocket handler for real-time voice sessions."""
     await websocket.accept()
+    print(f"[WebSocket] Accepted connection for client_id={client_id}")
 
     db = SessionLocal()
     try:
         c = db.get(Client, client_id)
         if not c or not c.profile:
+            print(f"[WebSocket] Client {client_id} or profile not found. Closing 1008.")
             await websocket.send_json({"type": "error", "message": "Client or profile not found"})
             await websocket.close(code=1008)
             return
 
         p = c.profile
-        if not p.voice_authorized or not p.voice_id:
+        voice_id = (p.voice_id or "").strip()
+        is_authorized = bool(p.voice_authorized)
+
+        # Fallback to active VoiceClone table record if profile voice_id is unset
+        if not voice_id:
+            from .models import VoiceClone
+            active_vc = db.query(VoiceClone).filter_by(client_id=client_id, is_active=True).first()
+            if active_vc and active_vc.voice_id:
+                voice_id = active_vc.voice_id.strip()
+                is_authorized = True
+
+        # If a voice_id is configured and ElevenLabs key exists, authorize it
+        if voice_id and settings.elevenlabs_api_key:
+            is_authorized = True
+
+        if not is_authorized or not voice_id:
+            print(f"[WebSocket] Client {client_id} voice not authorized (authorized={is_authorized}, voice_id='{voice_id}'). Closing 1008.")
             await websocket.send_json({"type": "error", "message": "Authorized voice is not configured for this client"})
             await websocket.close(code=1008)
             return
 
         executive_name = c.executive_name
-        voice_id = p.voice_id
+        print(f"[WebSocket] Client {client_id} ({executive_name}) session authorized with voice_id='{voice_id}'")
     finally:
         db.close()
 

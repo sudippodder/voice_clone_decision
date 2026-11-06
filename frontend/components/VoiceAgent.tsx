@@ -41,6 +41,7 @@ export function VoiceAgent({ data }: { data: any }) {
   const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
   const [lastAudioUrl, setLastAudioUrl] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const [wsStatusMsg, setWsStatusMsg] = useState('');
   const [textInput, setTextInput] = useState('');
 
   // Audio recording refs
@@ -98,6 +99,7 @@ export function VoiceAgent({ data }: { data: any }) {
     try {
       const base = getWsUrl();
       const wsUrl = `${base}/api/clients/${data.client.id}/voice/realtime`;
+      setWsStatusMsg('Connecting…');
       console.log('[VoiceAgent] Connecting WebSocket to:', wsUrl);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -106,6 +108,7 @@ export function VoiceAgent({ data }: { data: any }) {
         if (wsRef.current !== ws) return;
         console.log('[VoiceAgent] WebSocket connected successfully to:', wsUrl);
         setWsConnected(true);
+        setWsStatusMsg('');
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = setInterval(() => {
@@ -180,6 +183,7 @@ export function VoiceAgent({ data }: { data: any }) {
             setBusyStep('');
           } else if (msg.type === 'error') {
             setError(msg.message || 'Real-time voice error');
+            setWsStatusMsg(msg.message || 'Server error');
             setBusy(false);
             setBusyStep('');
           }
@@ -193,6 +197,14 @@ export function VoiceAgent({ data }: { data: any }) {
         if (wsRef.current === ws) {
           wsRef.current = null;
           setWsConnected(false);
+          const shortUrl = wsUrl.replace(/^wss?:\/\//, '');
+          const reasonText =
+            evt.code === 1008
+              ? 'Voice configuration needed (code 1008)'
+              : evt.code === 1006
+              ? `Connection refused at ${shortUrl}`
+              : `Closed (code ${evt.code})`;
+          setWsStatusMsg(reasonText);
         }
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         // Do not auto-reconnect if closure was intentional (code 1000)
@@ -208,6 +220,8 @@ export function VoiceAgent({ data }: { data: any }) {
         console.warn('[VoiceAgent] WebSocket error on:', wsUrl, err);
         if (wsRef.current === ws) {
           setWsConnected(false);
+          const shortUrl = wsUrl.replace(/^wss?:\/\//, '');
+          setWsStatusMsg(`Failed to connect to ${shortUrl}`);
         }
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       };
@@ -725,7 +739,7 @@ export function VoiceAgent({ data }: { data: any }) {
           <button
             type="button"
             onClick={() => {
-              if (!wsConnected) connectWebSocket();
+              connectWebSocket();
             }}
             title={wsConnected ? 'Real-time WebSocket streaming connected' : 'Click to connect real-time stream'}
             className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-300 text-xs font-bold tracking-wider uppercase transition-colors hover:bg-violet-500/20 cursor-pointer"
@@ -738,8 +752,11 @@ export function VoiceAgent({ data }: { data: any }) {
               PCM 24kHz • &lt;800ms Latency
             </span>
           ) : (
-            <span className="text-[11px] font-mono text-amber-400/80 bg-amber-950/30 px-2 py-0.5 rounded border border-amber-500/20">
-              HTTP Fallback Active
+            <span
+              className="text-[11px] font-mono text-amber-400/90 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/30 max-w-sm truncate"
+              title={wsStatusMsg ? `WebSocket status: ${wsStatusMsg}` : 'HTTP fallback active'}
+            >
+              HTTP Fallback {wsStatusMsg ? `(${wsStatusMsg})` : 'Active'}
             </span>
           )}
         </div>
