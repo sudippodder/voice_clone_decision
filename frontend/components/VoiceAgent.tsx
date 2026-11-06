@@ -753,10 +753,21 @@ export function VoiceAgent({ data }: { data: any }) {
             </span>
           ) : (
             <span
-              className="text-[11px] font-mono text-amber-400/90 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/30 max-w-sm truncate"
-              title={wsStatusMsg ? `WebSocket status: ${wsStatusMsg}` : 'HTTP fallback active'}
+              onClick={() => {
+                alert(
+                  `Real-Time Stream Diagnostics:\n\n` +
+                  `Target WebSocket URL:\n${getWsUrl()}/api/clients/${data.client.id}/voice/realtime\n\n` +
+                  `Current Status:\n${wsStatusMsg || 'Disconnected'}\n\n` +
+                  `Troubleshooting:\n` +
+                  `1. If using Nginx reverse proxy, ensure 'Upgrade' and 'Connection: upgrade' headers are configured.\n` +
+                  `2. If backend is on port 3855, verify port is reachable or specified in NEXT_PUBLIC_API_URL.\n` +
+                  `3. Check browser console (F12) for detailed network traces.`
+                );
+              }}
+              className="text-[11px] font-mono text-amber-400/90 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/30 max-w-sm truncate cursor-pointer hover:border-amber-400"
+              title="Click for WebSocket connection diagnostics"
             >
-              HTTP Fallback {wsStatusMsg ? `(${wsStatusMsg})` : 'Active'}
+              HTTP Fallback {wsStatusMsg ? `(${wsStatusMsg})` : 'Active'} ⓘ
             </span>
           )}
         </div>
