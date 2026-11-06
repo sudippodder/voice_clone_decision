@@ -7,7 +7,7 @@ import re
 from typing import AsyncGenerator, Callable, Any
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 
 from .config import settings
 from .db import SessionLocal
@@ -44,8 +44,8 @@ async def stream_decision_clauses(
         "user_text": user_text,
     }
 
-    # Step 1: Database retrieval & evidence evaluation (<50ms)
-    retrieved = retrieve_node(state)
+    # Step 1: Database retrieval & evidence evaluation (runs in worker thread so event loop remains responsive)
+    retrieved = await asyncio.to_thread(retrieve_node, state)
     state.update(retrieved)
 
     # Fast-path 1: Pure greeting
@@ -166,7 +166,7 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
         yield f"System error: OPENAI_API_KEY is not configured for {client.executive_name}."
         return
 
-    llm = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    llm = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     messages = [{"role": "system", "content": system_prompt}]
 
     for item in history[-6:]:
@@ -179,7 +179,6 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
     is_reasoning_model = any(k in model_name for k in ["o1", "o3", "gpt-5"])
 
     # Calculate token budget:
-    # Reasoning models (gpt-5, o1, o3) spend 200-400 tokens on internal reasoning before producing output.
     base_output_tokens = mode_config["max_tokens"]
     effective_max_tokens = (base_output_tokens + 800) if is_reasoning_model else base_output_tokens
 
@@ -195,7 +194,7 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
         call_kwargs["reasoning_effort"] = "low"
 
     try:
-        response_stream = llm.chat.completions.create(**call_kwargs)
+        response_stream = await llm.chat.completions.create(**call_kwargs)
     except Exception as e:
         fallback_kwargs: dict[str, Any] = {
             "model": settings.llm_model,
@@ -204,28 +203,34 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
         }
         if "max_completion_tokens" in str(e).lower():
             fallback_kwargs["max_tokens"] = effective_max_tokens
-        response_stream = llm.chat.completions.create(**fallback_kwargs)
+        response_stream = await llm.chat.completions.create(**fallback_kwargs)
 
-    # Accumulate tokens and yield completed sentences/clauses
+    # Accumulate tokens and yield completed sentences/clauses as soon as ready
     buffer = ""
     is_first_sentence = True
 
-    for chunk in response_stream:
+    async for chunk in response_stream:
         delta = chunk.choices[0].delta.content or ""
         if not delta:
             continue
         buffer += delta
 
-        # Check for sentence or clause boundaries (period, question mark, exclamation, semicolon, or newline)
-        if re.search(r"[\.\?!;\n]\s+", buffer) or (len(buffer) > 90 and " " in buffer[-12:]):
-            match = re.search(r"^(.*?[\.\?!;\n])(\s+.*)$", buffer, re.DOTALL)
-            if match:
+        # Check for sentence or clause boundaries:
+        # Match sentence end punctuation followed by whitespace OR at least 25 characters with terminal punctuation
+        if re.search(r"[\.\?!;\n](?:\s+|$)", buffer) or (len(buffer) > 70 and " " in buffer[-12:]):
+            match = re.search(r"^(.*?[\.\?!;\n])(?:\s+|$)(.*)$", buffer, re.DOTALL)
+            if match and len(match.group(1).strip()) > 3:
                 clause = match.group(1).strip()
                 buffer = match.group(2).strip()
-            else:
+            elif len(buffer) > 70:
                 last_space = buffer.rfind(" ")
-                clause = buffer[:last_space].strip()
-                buffer = buffer[last_space:].strip()
+                if last_space > 25:
+                    clause = buffer[:last_space].strip()
+                    buffer = buffer[last_space:].strip()
+                else:
+                    clause = ""
+            else:
+                clause = ""
 
             if clause:
                 clause = sanitize_response_node({"response": clause})["response"]
@@ -627,7 +632,7 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
                     continue
 
                 try:
-                    transcript = transcribe_audio(raw_audio, filename, client_name=executive_name)
+                    transcript = await asyncio.to_thread(transcribe_audio, raw_audio, filename, executive_name)
                     if not transcript or not transcript.strip():
                         await websocket.send_json({
                             "type": "error",
