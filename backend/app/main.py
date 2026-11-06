@@ -728,24 +728,34 @@ async def voice_turn(client_id: int, audio: UploadFile = File(...), conversation
         memories = db.query(Memory).filter(Memory.client_id == client_id).all()
         response = generate_response(client_id, c, p, memories, history, transcript)
 
-        audio_bytes, mime = synthesize_voice(response, p.voice_id)
+        audio_bytes = None
+        mime = "audio/mpeg"
+        if p.voice_id:
+            try:
+                audio_bytes, mime = synthesize_voice(response, p.voice_id)
+            except Exception as synth_err:
+                print(f"Warning: Voice synthesis failed for client {client_id}: {synth_err}")
+                audio_bytes = None
 
         asst_ext = "mp3" if "mp3" in (mime or "") else "wav"
         asst_msg = Message(conversation_id=conversation.id, role="assistant", text=response)
         db.add(asst_msg)
         db.flush()
 
-        asst_audio_url, asst_duration = save_audio_file(
-            client_id=client_id,
-            conv_id=conversation.id,
-            msg_id=asst_msg.id,
-            role="assistant",
-            audio_bytes=audio_bytes,
-            extension=asst_ext,
-        )
-        asst_msg.audio_url = asst_audio_url
-        asst_msg.audio_duration = asst_duration
-        asst_msg.audio_mime = mime
+        asst_audio_url = None
+        asst_duration = None
+        if audio_bytes:
+            asst_audio_url, asst_duration = save_audio_file(
+                client_id=client_id,
+                conv_id=conversation.id,
+                msg_id=asst_msg.id,
+                role="assistant",
+                audio_bytes=audio_bytes,
+                extension=asst_ext,
+            )
+            asst_msg.audio_url = asst_audio_url
+            asst_msg.audio_duration = asst_duration
+            asst_msg.audio_mime = mime
 
         update_conversation_metadata(
             conv_id=conversation.id,
@@ -759,8 +769,8 @@ async def voice_turn(client_id: int, audio: UploadFile = File(...), conversation
             "conversation_id": conversation.id,
             "transcript": transcript,
             "response": response,
-            "audio_base64": base64.b64encode(audio_bytes).decode(),
-            "mime_type": mime,
+            "audio_base64": base64.b64encode(audio_bytes).decode() if audio_bytes else None,
+            "mime_type": mime if audio_bytes else None,
             "user_audio_url": user_audio_url,
             "assistant_audio_url": asst_audio_url,
         }

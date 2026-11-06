@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import os
+import time
 import httpx
 from openai import OpenAI
 from .config import settings
@@ -59,16 +60,23 @@ def clone_voice(voice_name: str, audio: bytes, filename: str) -> str:
     headers = {"xi-api-key": settings.elevenlabs_api_key}
     files = {"files": (filename, audio, "audio/webm")}
     data = {"name": voice_name, "description": "Authorized executive digital voice"}
-    try:
-        r = httpx.post("https://api.elevenlabs.io/v1/voices/add", headers=headers, files=files, data=data, timeout=120)
-        r.raise_for_status()
-        return r.json()["voice_id"]
-    except (httpx.ConnectError, httpx.ProxyError):
-        # Fallback in case of dead environment proxy
-        with httpx.Client(timeout=120, trust_env=False) as direct_client:
-            r = direct_client.post("https://api.elevenlabs.io/v1/voices/add", headers=headers, files=files, data=data)
-            r.raise_for_status()
-            return r.json()["voice_id"]
+    
+    last_err = None
+    for attempt in range(3):
+        trust_env = (attempt == 0)
+        try:
+            with httpx.Client(timeout=120, trust_env=trust_env) as client:
+                r = client.post("https://api.elevenlabs.io/v1/voices/add", headers=headers, files=files, data=data)
+                r.raise_for_status()
+                return r.json()["voice_id"]
+        except (httpx.ConnectError, httpx.ProxyError, httpx.TimeoutException) as err:
+            last_err = err
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        except Exception as err:
+            raise err
+    if last_err:
+        raise last_err
 
 
 def synthesize_voice(text: str, voice_id: str) -> tuple[bytes, str]:
@@ -81,13 +89,22 @@ def synthesize_voice(text: str, voice_id: str) -> tuple[bytes, str]:
         "model_id": settings.elevenlabs_model_id,
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.85, "style": 0.15, "use_speaker_boost": True},
     }
-    try:
-        r = httpx.post(url, headers=headers, json=payload, timeout=120)
-        r.raise_for_status()
-        return r.content, "audio/mpeg"
-    except (httpx.ConnectError, httpx.ProxyError):
-        # Fallback in case of dead environment proxy
-        with httpx.Client(timeout=120, trust_env=False) as direct_client:
-            r = direct_client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            return r.content, "audio/mpeg"
+
+    last_err = None
+    for attempt in range(3):
+        # Attempt 0 uses system environment; subsequent attempts bypass any dead environment proxies
+        trust_env = (attempt == 0)
+        try:
+            with httpx.Client(timeout=60, trust_env=trust_env) as client:
+                r = client.post(url, headers=headers, json=payload)
+                r.raise_for_status()
+                return r.content, "audio/mpeg"
+        except (httpx.ConnectError, httpx.ProxyError, httpx.TimeoutException) as err:
+            last_err = err
+            time.sleep(0.4 * (attempt + 1))
+            continue
+        except Exception as err:
+            raise err
+
+    if last_err:
+        raise last_err

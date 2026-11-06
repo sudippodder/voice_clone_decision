@@ -586,6 +586,11 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
 
             msg_type = data.get("type")
 
+            # Case 0: Heartbeat Ping/Pong
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
             # Case 1: User Barge-In / Interruption
             if msg_type == "interrupt":
                 if active_turn_task and not active_turn_task.done():

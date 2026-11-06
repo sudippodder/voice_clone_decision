@@ -55,6 +55,8 @@ export function VoiceAgent({ data }: { data: any }) {
 
   // WebSocket & Web Audio Streaming Queue refs
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<any>(null);
+  const pingIntervalRef = useRef<any>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<AudioBufferSourceNode[]>([]);
   const nextStartTimeRef = useRef<number>(0);
@@ -91,13 +93,21 @@ export function VoiceAgent({ data }: { data: any }) {
 
       ws.onopen = () => {
         setWsConnected(true);
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 15000);
       };
 
       ws.onmessage = async (evt) => {
         try {
           const msg = JSON.parse(evt.data);
 
-          if (msg.type === 'session_started') {
+          if (msg.type === 'pong') {
+            return;
+          } else if (msg.type === 'session_started') {
             setWsConnected(true);
           } else if (msg.type === 'user_transcript') {
             setTranscript(msg.text || '');
@@ -166,20 +176,32 @@ export function VoiceAgent({ data }: { data: any }) {
 
       ws.onclose = () => {
         setWsConnected(false);
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = setTimeout(() => {
+          connectWebSocket();
+        }, 2000);
       };
 
       ws.onerror = () => {
         setWsConnected(false);
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       };
     } catch (e) {
       console.warn('WebSocket connection not initialized:', e);
       setWsConnected(false);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = setTimeout(() => {
+        connectWebSocket();
+      }, 3000);
     }
   }, [data.client.id]);
 
   useEffect(() => {
     connectWebSocket();
     return () => {
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
