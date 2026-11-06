@@ -398,6 +398,11 @@ export function VoiceAgent({ data }: { data: any }) {
     }
 
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error(
+          'Microphone access is blocked by your browser because this page is not in a Secure Context (HTTPS or localhost). Please open the site via http://localhost:3000, or use HTTPS, or configure chrome://flags/#unsafely-treat-insecure-origin-as-secure.'
+        );
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const mr = new MediaRecorder(stream);
