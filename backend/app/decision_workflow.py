@@ -34,26 +34,27 @@ from .vector_memory import search_chunks
 RESPONSE_MODES = {
     "short": {
         "instruction": (
-            "LENGTH BUDGET: Maximum 1-3 sentences (30-60 words).\n"
-            "STRUCTURE: State the exact decision or policy answer in the first sentence. "
-            "Follow with the primary database-recorded reason or condition. Stop immediately. "
-            "Never summarize documents or add conversational filler."
+            "LENGTH BUDGET: Maximum 1-2 sentences (20-40 words).\n"
+            "STYLE: Voice-first direct response. Provide ONLY the direct answer or decision statement. "
+            "NEVER use structural labels like 'Decision:', 'Evidence:', 'Source:', 'Caveat:', or 'Next step:'. "
+            "If the database provides an exact answer (such as in an approved Q&A document or policy), output ONLY that exact answer."
         ),
         "max_tokens": 120,
     },
     "moderate": {
         "instruction": (
-            "LENGTH BUDGET: 3-5 sentences (60-120 words).\n"
-            "STRUCTURE: State the decision first, cite the key database evidence/constraint, "
-            "mention one relevant caveat or authority limit, and state the next practical step."
+            "LENGTH BUDGET: Maximum 2-3 sentences (40-70 words).\n"
+            "STYLE: Voice-first response. State the direct answer or decision clearly and explain the rationale in natural spoken prose. "
+            "NEVER use prefix labels like 'Decision:', 'Evidence:', 'Source:', 'Caveat:', or 'Next step:'. "
+            "NEVER read out file names or citations. If the database provides an exact answer, output ONLY that exact answer directly."
         ),
         "max_tokens": 220,
     },
     "detailed": {
         "instruction": (
-            "LENGTH BUDGET: 150-250 words.\n"
-            "STRUCTURE: State the decision, key database evidence, trade-offs, risks, "
-            "and execution requirements. Only provide this level if detailed analysis was explicitly requested."
+            "LENGTH BUDGET: 3-5 sentences (80-150 words).\n"
+            "STYLE: State the direct answer first and provide comprehensive business rationale in clean spoken prose. "
+            "Do NOT use robotic structural prefixes, bullet points, or section headings."
         ),
         "max_tokens": 450,
     },
@@ -104,6 +105,14 @@ def check_is_greeting(text: str) -> bool:
     if not words or len(words) > 8:
         return False
 
+    # Check conversational pleasantries and check-ins
+    pleasantries = [
+        "how are you", "how are you doing", "how are things", "how is it going",
+        "how s it going", "how do you do", "how r u", "are you there", "can you hear me"
+    ]
+    if any(p == clean_alpha or clean_alpha.startswith(p) for p in pleasantries):
+        return True
+
     greeting_words = {
         "hi", "hello", "hey", "greetings", "howdy", "good",
         "হায়", "হ্যালো", "হাই", "নমস্কার", "সালাম"
@@ -126,8 +135,15 @@ def retrieve_node(state: DecisionState) -> DecisionState:
     client_id = state.get("client_id", 0)
     user_text = state.get("user_text", "").strip()
 
-    # 1. Detect if input is simply a greeting
-    if check_is_greeting(user_text):
+    # 1. Similarity-Gated Hybrid Vector + Lexical Search (Threshold >= 0.28)
+    try:
+        vector_memories = search_chunks(client_id, user_text, limit=4, min_similarity=0.28)
+    except Exception as e:
+        print(f"Vector retrieval error: {e}")
+        vector_memories = []
+
+    # 2. Detect if input is a greeting/pleasantry AND has no specific document chunk match
+    if check_is_greeting(user_text) and not vector_memories:
         return {
             "is_pure_greeting": True,
             "has_sufficient_evidence": True,
@@ -136,13 +152,6 @@ def retrieve_node(state: DecisionState) -> DecisionState:
             "profile_records": [],
             "situation_guidelines": [],
         }
-
-    # 2. Similarity-Gated Vector Search (Threshold >= 0.40)
-    try:
-        vector_memories = search_chunks(client_id, user_text, limit=4, min_similarity=0.40)
-    except Exception as e:
-        print(f"Vector retrieval error: {e}")
-        vector_memories = []
 
     # 3. Neo4j Graph Retrieval
     try:
@@ -341,7 +350,7 @@ def reason_node(state: DecisionState) -> DecisionState:
     situation_text = "\n".join(situation_items) if situation_items else "None."
 
     system_prompt = f"""You are the Digital Executive Decision Intelligence Agent for {client.executive_name}.
-You are NOT a conversational chatbot. You are a precise decision engine grounded strictly in {client.executive_name}'s database.
+You are a voice agent. Speak cleanly, directly, and naturally. Ground every answer strictly in {client.executive_name}'s database.
 
 =======================================================
 MANDATORY OPERATING RULES:
@@ -351,21 +360,25 @@ MANDATORY OPERATING RULES:
    NEVER use general world knowledge, training assumptions, or unverified opinions.
    NEVER fabricate policies, commitments, or precedents.
 
-2. ZERO HUMAN TALK / NO CONVERSATIONAL FILLER:
-   - NO greetings ("Hello", "Hi", "Good morning").
+2. RETURN ONLY THE DIRECT SPOKEN ANSWER:
+   - Output ONLY the direct answer/statement itself in clean spoken language.
+   - NEVER output structural labels or headers like "Decision:", "Evidence:", "Reason:", "Caveat:", "Next step:", or "Source:".
+   - NEVER read out document filenames, page numbers, or Q&A IDs (e.g. do NOT say "ExecutiveMind_General_Communication_QA_Part_1.docx.pdf" or "Q007").
+   - If the database contains an exact answer for the user's inquiry (such as in an approved Q&A document or policy statement), deliver ONLY that exact answer directly (e.g. "I am functioning normally and ready to assist.").
+
+3. ZERO CONVERSATIONAL FILLER:
    - NO pleasantries or filler ("Certainly!", "I would be delighted to help", "Thanks for asking").
    - NO AI disclaimers ("As an AI representation...", "According to the documents provided...").
-   - Deliver the decision and rationale directly and professionally.
 
-3. {mode_config["instruction"]}
+4. {mode_config["instruction"]}
    Tone: {tone}.
    Directness: {directness_instruction}
 
-4. INSUFFICIENT EVIDENCE:
+5. INSUFFICIENT EVIDENCE:
    If the provided database records do not directly answer the inquiry or establish precedent, respond EXACTLY:
    "I cannot determine this from {client.executive_name}'s saved information. No relevant approved policy or decision record was found in the database."
 
-5. GOVERNANCE & ESCALATION:
+6. GOVERNANCE & ESCALATION:
    If a question involves financial, legal, or personnel commitments exceeding recorded authority, state the decision limit in one sentence and escalate to {client.executive_name}.
 
 =======================================================
@@ -458,16 +471,27 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
 
 
 def sanitize_response_node(state: DecisionState) -> DecisionState:
-    """Strips accidental conversational filler and pleasantries from the generated response."""
+    """Strips accidental conversational filler, robotic labels, and metadata from the response."""
     text = state.get("response", "").strip()
 
     # Normalize special unicode punctuation for clean TTS and display
     text = text.replace("\u2011", "-").replace("\u2012", "-").replace("\u2013", "-").replace("\u2014", " - ")
     text = text.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
 
+    # Strip structural label prefixes: "Decision:", "Answer:", "Response:", "Direct Answer:"
+    text = re.sub(r"^(decision|direct answer|answer|response)\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+
+    # Strip metadata/evidence suffix blocks if present
+    text = re.sub(r"(?:\s+)(?:evidence|source|citation)\s*:\s*.*?(?=(?:\s+(?:caveat|next step|next practical step)|\Z))", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+    text = re.sub(r"(?:\s+)(?:caveat|restriction)\s*:\s*.*?(?=(?:\s+(?:next step|next practical step)|\Z))", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+    text = re.sub(r"(?:\s+)(?:next step|next practical step)\s*:\s*.*$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+
     # Strip conversational chatter patterns
     for pattern in CHATTER_PATTERNS:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+
+    # Final cleanup of any leading label
+    text = re.sub(r"^(decision|direct answer|answer|response)\s*:\s*", "", text, flags=re.IGNORECASE).strip()
 
     if text:
         text = text[0].upper() + text[1:]
