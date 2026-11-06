@@ -83,7 +83,19 @@ export function VoiceAgent({ data }: { data: any }) {
 
   // --- REAL-TIME WEBSOCKET MANAGEMENT ---
   const connectWebSocket = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+    // If an existing socket is already OPEN or CONNECTING, do not open another
+    if (wsRef.current) {
+      if (
+        wsRef.current.readyState === WebSocket.OPEN ||
+        wsRef.current.readyState === WebSocket.CONNECTING
+      ) {
+        return;
+      }
+      try {
+        wsRef.current.close(1000);
+      } catch (e) {}
+      wsRef.current = null;
+    }
 
     try {
       const base = API.replace(/^http/, 'ws');
@@ -92,7 +104,9 @@ export function VoiceAgent({ data }: { data: any }) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (wsRef.current !== ws) return;
         setWsConnected(true);
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
@@ -174,17 +188,25 @@ export function VoiceAgent({ data }: { data: any }) {
         }
       };
 
-      ws.onclose = () => {
-        setWsConnected(false);
+      ws.onclose = (evt) => {
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+          setWsConnected(false);
+        }
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
-        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = setTimeout(() => {
-          connectWebSocket();
-        }, 2000);
+        // Do not auto-reconnect if closure was intentional (code 1000)
+        if (evt.code !== 1000) {
+          if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = setTimeout(() => {
+            connectWebSocket();
+          }, 3000);
+        }
       };
 
       ws.onerror = () => {
-        setWsConnected(false);
+        if (wsRef.current === ws) {
+          setWsConnected(false);
+        }
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       };
     } catch (e) {
@@ -203,7 +225,9 @@ export function VoiceAgent({ data }: { data: any }) {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       if (wsRef.current) {
-        wsRef.current.close();
+        try {
+          wsRef.current.close(1000);
+        } catch (e) {}
         wsRef.current = null;
       }
     };
@@ -537,6 +561,14 @@ export function VoiceAgent({ data }: { data: any }) {
   async function submitTurn(blob: Blob) {
     setBusy(true);
     setBusyStep('Connecting to real-time decision stream…');
+
+    // If WebSocket is currently establishing connection, wait briefly
+    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
+      for (let i = 0; i < 4; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (wsRef.current?.readyState === WebSocket.OPEN) break;
+      }
+    }
 
     // Priority 1: Fast WebSocket Streaming Path
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
