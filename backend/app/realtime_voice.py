@@ -5,6 +5,7 @@ import io
 import json
 import re
 from typing import AsyncGenerator, Callable, Any
+import httpx
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 from openai import OpenAI, AsyncOpenAI
@@ -196,14 +197,26 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
     try:
         response_stream = await llm.chat.completions.create(**call_kwargs)
     except Exception as e:
-        fallback_kwargs: dict[str, Any] = {
-            "model": settings.llm_model,
-            "messages": messages,
-            "stream": True,
-        }
-        if "max_completion_tokens" in str(e).lower():
-            fallback_kwargs["max_tokens"] = effective_max_tokens
-        response_stream = await llm.chat.completions.create(**fallback_kwargs)
+        if "connect" in str(e).lower():
+            # Fallback in case of dead environment proxy
+            try:
+                direct_llm = AsyncOpenAI(
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                    http_client=httpx.AsyncClient(trust_env=False, timeout=60.0)
+                )
+                response_stream = await direct_llm.chat.completions.create(**call_kwargs)
+            except Exception:
+                raise e
+        else:
+            fallback_kwargs: dict[str, Any] = {
+                "model": settings.llm_model,
+                "messages": messages,
+                "stream": True,
+            }
+            if "max_completion_tokens" in str(e).lower():
+                fallback_kwargs["max_tokens"] = effective_max_tokens
+            response_stream = await llm.chat.completions.create(**fallback_kwargs)
 
     # Accumulate tokens and yield completed sentences/clauses as soon as ready
     buffer = ""

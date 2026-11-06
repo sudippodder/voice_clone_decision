@@ -1,4 +1,5 @@
 import re
+import httpx
 from openai import OpenAI
 from sqlalchemy import select, text
 from .config import settings
@@ -8,9 +9,18 @@ from .models import KnowledgeChunk
 def embed_text(content: str) -> list[float] | None:
     if not settings.openai_api_key:
         return None
-    client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-    response = client.embeddings.create(model=settings.embedding_model, input=content[:8000])
-    return response.data[0].embedding
+    try:
+        client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        response = client.embeddings.create(model=settings.embedding_model, input=content[:8000])
+        return response.data[0].embedding
+    except Exception as err:
+        if "connect" in str(err).lower():
+            # Fallback in case of dead environment proxy
+            direct_http = httpx.Client(trust_env=False, timeout=30.0)
+            direct_client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, http_client=direct_http)
+            response = direct_client.embeddings.create(model=settings.embedding_model, input=content[:8000])
+            return response.data[0].embedding
+        raise
 
 def save_chunks(client_id: int, source_name: str, content: str) -> int:
     chunks = [content[i:i+1200] for i in range(0, len(content), 1000) if content[i:i+1200].strip()]

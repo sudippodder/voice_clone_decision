@@ -18,6 +18,7 @@ except Exception:
 
 import re
 import json
+import httpx
 from typing import TypedDict, Any
 from langgraph.graph import StateGraph, END
 from openai import OpenAI
@@ -443,14 +444,26 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
         result = llm.chat.completions.create(**call_kwargs)
         raw_text = result.choices[0].message.content or ""
     except Exception as e:
-        fallback_kwargs: dict[str, Any] = {
-            "model": settings.llm_model,
-            "messages": messages,
-        }
-        if "max_completion_tokens" in str(e).lower():
-            fallback_kwargs["max_tokens"] = effective_max_tokens
-        result = llm.chat.completions.create(**fallback_kwargs)
-        raw_text = result.choices[0].message.content or ""
+        if "connect" in str(e).lower():
+            try:
+                direct_llm = OpenAI(
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                    http_client=httpx.Client(trust_env=False, timeout=60.0)
+                )
+                result = direct_llm.chat.completions.create(**call_kwargs)
+                raw_text = result.choices[0].message.content or ""
+            except Exception:
+                raise e
+        else:
+            fallback_kwargs: dict[str, Any] = {
+                "model": settings.llm_model,
+                "messages": messages,
+            }
+            if "max_completion_tokens" in str(e).lower():
+                fallback_kwargs["max_tokens"] = effective_max_tokens
+            result = llm.chat.completions.create(**fallback_kwargs)
+            raw_text = result.choices[0].message.content or ""
 
     if not raw_text.strip():
         # Fallback if reasoning model depleted tokens

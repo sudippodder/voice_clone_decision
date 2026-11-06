@@ -12,12 +12,22 @@ def transcribe_audio(audio: bytes, filename: str = "audio.webm", client_name: st
         return ""
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
-    client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     f = io.BytesIO(audio)
     f.name = filename
     exec_prompt = f"Executive voice agent for Shaun, Koushik, {client_name}. Virtual Employee, hiring funnel triad, trial, interview, playbook."
-    result = client.audio.transcriptions.create(model="whisper-1", file=f, prompt=exec_prompt)
-    return result.text or ""
+    try:
+        client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        result = client.audio.transcriptions.create(model="whisper-1", file=f, prompt=exec_prompt)
+        return result.text or ""
+    except Exception as err:
+        if "connect" in str(err).lower():
+            # Fallback bypassing dead environment proxy
+            f.seek(0)
+            direct_http = httpx.Client(trust_env=False, timeout=60.0)
+            direct_client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, http_client=direct_http)
+            result = direct_client.audio.transcriptions.create(model="whisper-1", file=f, prompt=exec_prompt)
+            return result.text or ""
+        raise
 
 
 def build_system_prompt(client, profile, memories) -> str:
@@ -49,9 +59,16 @@ def clone_voice(voice_name: str, audio: bytes, filename: str) -> str:
     headers = {"xi-api-key": settings.elevenlabs_api_key}
     files = {"files": (filename, audio, "audio/webm")}
     data = {"name": voice_name, "description": "Authorized executive digital voice"}
-    r = httpx.post("https://api.elevenlabs.io/v1/voices/add", headers=headers, files=files, data=data, timeout=120)
-    r.raise_for_status()
-    return r.json()["voice_id"]
+    try:
+        r = httpx.post("https://api.elevenlabs.io/v1/voices/add", headers=headers, files=files, data=data, timeout=120)
+        r.raise_for_status()
+        return r.json()["voice_id"]
+    except (httpx.ConnectError, httpx.ProxyError):
+        # Fallback in case of dead environment proxy
+        with httpx.Client(timeout=120, trust_env=False) as direct_client:
+            r = direct_client.post("https://api.elevenlabs.io/v1/voices/add", headers=headers, files=files, data=data)
+            r.raise_for_status()
+            return r.json()["voice_id"]
 
 
 def synthesize_voice(text: str, voice_id: str) -> tuple[bytes, str]:
@@ -64,6 +81,13 @@ def synthesize_voice(text: str, voice_id: str) -> tuple[bytes, str]:
         "model_id": settings.elevenlabs_model_id,
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.85, "style": 0.15, "use_speaker_boost": True},
     }
-    r = httpx.post(url, headers=headers, json=payload, timeout=120)
-    r.raise_for_status()
-    return r.content, "audio/mpeg"
+    try:
+        r = httpx.post(url, headers=headers, json=payload, timeout=120)
+        r.raise_for_status()
+        return r.content, "audio/mpeg"
+    except (httpx.ConnectError, httpx.ProxyError):
+        # Fallback in case of dead environment proxy
+        with httpx.Client(timeout=120, trust_env=False) as direct_client:
+            r = direct_client.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            return r.content, "audio/mpeg"
