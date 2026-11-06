@@ -10,7 +10,6 @@ uploads/*
 recordings/
 **/recordings/
 backend/recordings/
-backend/backend/
 *.wav
 *.mp3
 *.webm
