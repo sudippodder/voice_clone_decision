@@ -1,9 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY || 'change-this-admin-key';
+import { getApiUrl, getAdminKey } from '../utils/api';
 
 export type Client = {
   id: number;
@@ -80,10 +78,16 @@ export function ClientList({
   async function loadClients() {
     setLoading(true);
     setError('');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
     try {
-      const res = await fetch(`${API}/api/clients`, {
-        headers: { 'X-Admin-Key': KEY },
+      const api = getApiUrl();
+      const key = getAdminKey();
+      const res = await fetch(`${api}/api/clients`, {
+        headers: { 'X-Admin-Key': key },
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `HTTP error ${res.status}`);
@@ -91,8 +95,13 @@ export function ClientList({
       const data: Client[] = await res.json();
       setClients(data);
     } catch (err: any) {
-      setError(err.message || 'Failed to load clients.');
+      if (err.name === 'AbortError') {
+        setError(`Connection timed out after 10s connecting to backend at ${getApiUrl()}. Please check that the server is reachable and Uvicorn is running.`);
+      } else {
+        setError(err.message || 'Failed to load clients.');
+      }
     } finally {
+      clearTimeout(timeoutId);
       setLoading(false);
     }
   }
@@ -163,11 +172,11 @@ export function ClientList({
 
     setSubmitting(true);
     try {
-      const res = await fetch(`${API}/api/clients`, {
+      const res = await fetch(`${getApiUrl()}/api/clients`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Admin-Key': KEY,
+          'X-Admin-Key': getAdminKey(),
         },
         body: JSON.stringify(formData),
       });
@@ -205,11 +214,11 @@ export function ClientList({
 
     setSubmitting(true);
     try {
-      const res = await fetch(`${API}/api/clients/${editingClient.id}`, {
+      const res = await fetch(`${getApiUrl()}/api/clients/${editingClient.id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'X-Admin-Key': KEY,
+          'X-Admin-Key': getAdminKey(),
         },
         body: JSON.stringify(formData),
       });
@@ -242,11 +251,11 @@ export function ClientList({
         prev.map((c) => (c.id === client.id ? { ...c, active: newActiveState } : c))
       );
 
-      const res = await fetch(`${API}/api/clients/${client.id}`, {
+      const res = await fetch(`${getApiUrl()}/api/clients/${client.id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'X-Admin-Key': KEY,
+          'X-Admin-Key': getAdminKey(),
         },
         body: JSON.stringify({ active: newActiveState }),
       });
@@ -274,10 +283,10 @@ export function ClientList({
     setSubmitting(true);
 
     try {
-      const res = await fetch(`${API}/api/clients/${deletingClient.id}`, {
+      const res = await fetch(`${getApiUrl()}/api/clients/${deletingClient.id}`, {
         method: 'DELETE',
         headers: {
-          'X-Admin-Key': KEY,
+          'X-Admin-Key': getAdminKey(),
         },
       });
 
@@ -424,7 +433,7 @@ export function ClientList({
           </div>
           <p className="text-sm text-rose-300/90">{error}</p>
           <div className="text-xs text-rose-400/70 pt-2 border-t border-rose-900/40 flex items-center justify-between">
-            <span>Verify backend is running on port 8000 and ADMIN_API_KEY matches.</span>
+            <span>Backend: {getApiUrl()} (Verify server is running and ADMIN_API_KEY matches)</span>
             <button
               onClick={loadClients}
               className="btn btn-secondary !py-1 !px-3 text-xs text-white"

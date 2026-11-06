@@ -1,9 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY || 'change-this-admin-key';
+import { getApiUrl, getAdminKey } from '../utils/api';
 
 interface ConversationListItem {
   id: number;
@@ -32,6 +30,8 @@ interface ConversationDetail extends ConversationListItem {
 }
 
 export function ConversationHistory({ clientId }: { clientId: number }) {
+  const API = getApiUrl();
+  const KEY = getAdminKey();
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [activeConv, setActiveConv] = useState<ConversationDetail | null>(null);

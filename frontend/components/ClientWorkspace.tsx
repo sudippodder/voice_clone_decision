@@ -3,9 +3,7 @@ import { useEffect, useState } from 'react';
 import { SettingsPanel } from './SettingsPanel';
 import { VoiceAgent } from './VoiceAgent';
 import { ConversationHistory } from './ConversationHistory';
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY || 'change-this-admin-key';
+import { getApiUrl, getAdminKey } from '../utils/api';
 
 export function ClientWorkspace({
   clientId,
@@ -23,8 +21,8 @@ export function ClientWorkspace({
   async function load() {
     try {
       setError(null);
-      const r = await fetch(`${API}/api/clients/${clientId}`, {
-        headers: { 'X-Admin-Key': KEY },
+      const r = await fetch(`${getApiUrl()}/api/clients/${clientId}`, {
+        headers: { 'X-Admin-Key': getAdminKey() },
       });
       const json = await r.json();
       if (!r.ok || !json.client) throw new Error(json.detail || 'Failed to load client');

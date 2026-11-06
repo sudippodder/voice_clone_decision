@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import { getApiUrl } from '../utils/api';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const SESSION_KEY = 'exec_voice_agent_session';
 
 interface SessionData {
@@ -48,7 +48,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     setErrorMsg('');
 
     try {
-      const res = await fetch(`${API}/api/auth/login`, {
+      const res = await fetch(`${getApiUrl()}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password }),

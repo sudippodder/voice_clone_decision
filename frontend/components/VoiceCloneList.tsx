@@ -1,9 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY || 'change-this-admin-key';
+import { getApiUrl, getAdminKey } from '../utils/api';
 
 export type VoiceCloneItem = {
   id: number;
@@ -34,6 +32,8 @@ export function VoiceCloneList({
 }: {
   onOpenClient: (clientId: number, tab?: 'settings' | 'agent') => void;
 }) {
+  const API = getApiUrl();
+  const KEY = getAdminKey();
   const [voices, setVoices] = useState<VoiceCloneItem[]>([]);
   const [clients, setClients] = useState<ClientOption[]>([]);
   const [loading, setLoading] = useState(true);

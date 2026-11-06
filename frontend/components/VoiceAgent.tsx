@@ -1,9 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const KEY = process.env.NEXT_PUBLIC_ADMIN_API_KEY || 'change-this-admin-key';
+import { getApiUrl, getWsUrl, getAdminKey } from '../utils/api';
 
 function pcmToWavBlob(pcmBytes: Uint8Array, sampleRate = 24000): Blob {
   const wavHeader = new ArrayBuffer(44);
@@ -98,7 +96,7 @@ export function VoiceAgent({ data }: { data: any }) {
     }
 
     try {
-      const base = API.replace(/^http/, 'ws');
+      const base = getWsUrl();
       const wsUrl = `${base}/api/clients/${data.client.id}/voice/realtime`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -621,9 +619,9 @@ export function VoiceAgent({ data }: { data: any }) {
       fd.append('audio', blob, 'voice.webm');
       if (conversationId) fd.append('conversation_id', String(conversationId));
 
-      const r = await fetch(`${API}/api/clients/${data.client.id}/voice/turn`, {
+      const r = await fetch(`${getApiUrl()}/api/clients/${data.client.id}/voice/turn`, {
         method: 'POST',
-        headers: { 'X-Admin-Key': KEY },
+        headers: { 'X-Admin-Key': getAdminKey() },
         body: fd,
       });
 
