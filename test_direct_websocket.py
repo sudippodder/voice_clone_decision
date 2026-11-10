@@ -92,7 +92,7 @@ async def run_test(url: str):
             print("       Streaming response chunks from backend:")
             while True:
                 try:
-                    chunk_raw = await asyncio.wait_for(ws.recv(), timeout=12.0)
+                    chunk_raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
                     chunk = json.loads(chunk_raw)
                     chunk_type = chunk.get("type")
 
@@ -122,15 +122,19 @@ async def run_test(url: str):
                     elif chunk_type == "warning":
                         print(f"       -> [Agent Warning]: {chunk.get('message')}")
                 except asyncio.TimeoutError:
-                    print("       -> [Timeout]: Waiting for response timed out after 12s.")
+                    print("       -> [Timeout]: Waiting for response timed out after 30s.")
                     break
 
             # Step 5: Socket stability test (keep idle for 10 seconds to verify no drop)
             print("\n[5/5] Testing connection stability (keeping socket idle for 10s)...")
             for sec in range(1, 11):
                 await asyncio.sleep(1)
-                # Check if still open
-                if ws.closed:
+                is_closed = (
+                    ws.close_code is not None
+                    or getattr(ws, "closed", False)
+                    or getattr(getattr(ws, "state", None), "name", "") == "CLOSED"
+                )
+                if is_closed:
                     print(f"  [FAIL] Socket closed prematurely at {sec}s with code: {ws.close_code}")
                     return False
 
