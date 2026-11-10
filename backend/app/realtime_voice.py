@@ -341,17 +341,23 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
     print(f"[WebSocket] Accepted connection for client_id={client_id}")
 
     db = SessionLocal()
+    executive_name = f"Executive #{client_id}"
+    voice_id = ""
+    is_authorized = False
+
     try:
         c = db.get(Client, client_id)
-        if not c or not c.profile:
-            print(f"[WebSocket] Client {client_id} or profile not found. Closing 1008.")
-            await websocket.send_json({"type": "error", "message": "Client or profile not found"})
-            await websocket.close(code=1008)
+        if not c:
+            print(f"[WebSocket] Client {client_id} not found in database. Closing.")
+            await websocket.send_json({"type": "error", "message": "Client not found in database"})
+            await websocket.close(code=1000)
             return
 
+        executive_name = c.executive_name
         p = c.profile
-        voice_id = (p.voice_id or "").strip()
-        is_authorized = bool(p.voice_authorized)
+        if p:
+            voice_id = (p.voice_id or "").strip()
+            is_authorized = bool(p.voice_authorized)
 
         # Fallback to active VoiceClone table record if profile voice_id is unset
         if not voice_id:
@@ -365,24 +371,29 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
         if voice_id and settings.elevenlabs_api_key:
             is_authorized = True
 
-        if not is_authorized or not voice_id:
-            print(f"[WebSocket] Client {client_id} voice not authorized (authorized={is_authorized}, voice_id='{voice_id}'). Closing 1008.")
-            await websocket.send_json({"type": "error", "message": "Authorized voice is not configured for this client"})
-            await websocket.close(code=1008)
-            return
-
-        executive_name = c.executive_name
-        print(f"[WebSocket] Client {client_id} ({executive_name}) session authorized with voice_id='{voice_id}'")
+        print(f"[WebSocket] Client {client_id} ({executive_name}) session active (voice_id='{voice_id}', authorized={is_authorized})")
+    except Exception as db_err:
+        import traceback
+        traceback.print_exc()
+        print(f"[WebSocket] Error querying client {client_id}: {db_err}")
     finally:
         db.close()
 
-    # Initial session handshake
+    # Initial session handshake - ALWAYS keep connection open!
     await websocket.send_json({
         "type": "session_started",
         "client_id": client_id,
         "executive_name": executive_name,
         "voice_id": voice_id,
+        "voice_authorized": is_authorized,
     })
+
+    if not is_authorized or not voice_id:
+        print(f"[WebSocket] Note: Client {client_id} voice not fully configured. Spoken output will be silent until selected in Settings.")
+        await websocket.send_json({
+            "type": "warning",
+            "message": f"Voice twin is not yet configured for {executive_name}. Real-time transcription and reasoning are active; speech synthesis will activate once a voice is selected in Settings > Voice.",
+        })
 
     active_turn_task: asyncio.Task | None = None
     current_conversation_id: int | None = None
@@ -491,6 +502,10 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
 
             async def tts_streaming_task():
                 nonlocal audio_synthesized
+                if not voice_id:
+                    async for _ in text_iterator():
+                        pass
+                    return
                 try:
                     await stream_elevenlabs_tts(voice_id, text_iterator(), audio_chunk_consumer)
                     audio_synthesized = True
@@ -703,11 +718,14 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
                 await websocket.send_json({"type": "pong"})
 
     except WebSocketDisconnect:
+        print(f"[WebSocket] Client {client_id} disconnected normally.")
         if active_turn_task and not active_turn_task.done():
             active_turn_task.cancel()
     except Exception as loop_err:
+        import traceback
+        traceback.print_exc()
         clean_err = str(loop_err).encode("ascii", "replace").decode("ascii")
-        print(f"WebSocket session exception: {clean_err}")
+        print(f"[WebSocket] Session exception for client {client_id}: {clean_err}")
         if active_turn_task and not active_turn_task.done():
             active_turn_task.cancel()
 

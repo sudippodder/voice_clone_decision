@@ -126,6 +126,8 @@ export function VoiceAgent({ data }: { data: any }) {
             return;
           } else if (msg.type === 'session_started') {
             setWsConnected(true);
+          } else if (msg.type === 'warning') {
+            console.warn('[VoiceAgent] Server warning:', msg.message);
           } else if (msg.type === 'user_transcript') {
             setTranscript(msg.text || '');
             transcriptRef.current = msg.text || '';
