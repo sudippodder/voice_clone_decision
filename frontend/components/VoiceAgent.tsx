@@ -70,13 +70,17 @@ export function VoiceAgent({ data }: { data: any }) {
   const timerRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // WebSocket & Web Audio Streaming Queue refs
+  // WebSocket & Web Audio Continuous Streaming refs
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<any>(null);
   const pingIntervalRef = useRef<any>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const audioQueueRef = useRef<AudioBufferSourceNode[]>([]);
-  const nextStartTimeRef = useRef<number>(0);
+  const scriptNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const pcmQueueRef = useRef<Float32Array[]>([]);
+  const pcmQueueOffsetRef = useRef<number>(0);
+  const leftoverByteRef = useRef<Uint8Array | null>(null);
+  const isStreamingPlaybackStartedRef = useRef<boolean>(false);
+  const isStreamingTurnFinishedRef = useRef<boolean>(false);
   const receivedPcmChunksRef = useRef<Uint8Array[]>([]);
   const playedAnyPcmRef = useRef<boolean>(false);
   const recognitionRef = useRef<any>(null);
@@ -264,6 +268,7 @@ export function VoiceAgent({ data }: { data: any }) {
           } else if (msg.type === 'agent_turn_finished') {
             setBusy(false);
             setBusyStep('');
+            isStreamingTurnFinishedRef.current = true;
             if (msg.conversation_id) setConversationId(msg.conversation_id);
 
             let turnAudioUrl: string | null = null;
@@ -295,9 +300,13 @@ export function VoiceAgent({ data }: { data: any }) {
                 };
                 fallbackAudio.play().catch(() => {});
               }
-            } else if (msg.assistant_audio_url) {
-              turnAudioUrl = `${getApiUrl()}${msg.assistant_audio_url}`;
-              setLastAudioUrl(turnAudioUrl);
+            } else {
+              setIsPlaying(false);
+              setIsPlaybackPaused(false);
+              if (msg.assistant_audio_url) {
+                turnAudioUrl = `${getApiUrl()}${msg.assistant_audio_url}`;
+                setLastAudioUrl(turnAudioUrl);
+              }
             }
 
             // Commit completed turn to discussion history
@@ -433,63 +442,158 @@ export function VoiceAgent({ data }: { data: any }) {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
 
-  // --- RAW PCM WEB AUDIO API STREAMING QUEUE ---
+  // --- CONTINUOUS RAW PCM STREAM PLAYER (FIFO QUEUE) ---
+  function ensurePcmPlayer(ctx: AudioContext): ScriptProcessorNode {
+    if (scriptNodeRef.current) {
+      return scriptNodeRef.current;
+    }
+
+    // 2048 buffer size gives ~42.6ms buffer at 48kHz for low-latency, glitch-free audio
+    const node = ctx.createScriptProcessor(2048, 1, 2);
+    node.onaudioprocess = (event) => {
+      const outLeft = event.outputBuffer.getChannelData(0);
+      const hasRight = event.outputBuffer.numberOfChannels > 1;
+      const queue = pcmQueueRef.current;
+
+      // Jitter buffer pre-buffering check:
+      // Wait for at least ~120ms of audio (ctx.sampleRate * 0.12) before beginning playback,
+      // or start immediately if the backend turn is already finished.
+      if (!isStreamingPlaybackStartedRef.current) {
+        let totalBuffered = 0;
+        for (let j = 0; j < queue.length; j++) {
+          totalBuffered += queue[j].length;
+        }
+        totalBuffered -= pcmQueueOffsetRef.current;
+
+        const minBufferSamples = Math.round(ctx.sampleRate * 0.12);
+        if (totalBuffered >= minBufferSamples || isStreamingTurnFinishedRef.current) {
+          if (totalBuffered > 0) {
+            isStreamingPlaybackStartedRef.current = true;
+          }
+        }
+      }
+
+      if (!isStreamingPlaybackStartedRef.current || queue.length === 0) {
+        outLeft.fill(0);
+        if (hasRight) {
+          event.outputBuffer.getChannelData(1).fill(0);
+        }
+        if (isStreamingTurnFinishedRef.current && queue.length === 0) {
+          if (isStreamingPlaybackStartedRef.current) {
+            isStreamingPlaybackStartedRef.current = false;
+            setIsPlaying(false);
+            setIsPlaybackPaused(false);
+          }
+        }
+        return;
+      }
+
+      let written = 0;
+      while (written < outLeft.length && queue.length > 0) {
+        const chunk = queue[0];
+        const available = chunk.length - pcmQueueOffsetRef.current;
+        const needed = outLeft.length - written;
+
+        if (available <= needed) {
+          outLeft.set(chunk.subarray(pcmQueueOffsetRef.current), written);
+          written += available;
+          queue.shift();
+          pcmQueueOffsetRef.current = 0;
+        } else {
+          outLeft.set(
+            chunk.subarray(pcmQueueOffsetRef.current, pcmQueueOffsetRef.current + needed),
+            written
+          );
+          pcmQueueOffsetRef.current += needed;
+          written += needed;
+        }
+      }
+
+      if (written < outLeft.length) {
+        outLeft.fill(0, written);
+        if (isStreamingTurnFinishedRef.current && queue.length === 0) {
+          isStreamingPlaybackStartedRef.current = false;
+          setIsPlaying(false);
+          setIsPlaybackPaused(false);
+        }
+      }
+
+      if (hasRight) {
+        event.outputBuffer.getChannelData(1).set(outLeft);
+      }
+    };
+
+    node.connect(ctx.destination);
+    scriptNodeRef.current = node;
+    return node;
+  }
+
   async function queueAudioChunk(base64: string, mime: string, sampleRate = 24000) {
     if (mime === 'audio/pcm' || sampleRate) {
       try {
         const binaryString = atob(base64);
         const len = binaryString.length;
-        const bytes = new Uint8Array(len);
+        const newBytes = new Uint8Array(len);
         for (let i = 0; i < len; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
+          newBytes[i] = binaryString.charCodeAt(i);
         }
 
         // Store PCM bytes for replay WAV assembly
-        receivedPcmChunksRef.current.push(bytes);
+        receivedPcmChunksRef.current.push(newBytes);
 
-        const ctx = ensureAudioContext();
-        const numSamples = Math.floor(bytes.length / 2);
-        const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, numSamples);
+        // Prepend any odd leftover byte from prior chunk to guarantee 16-bit 2-byte boundary alignment
+        let rawBytes: Uint8Array;
+        if (leftoverByteRef.current && leftoverByteRef.current.length > 0) {
+          rawBytes = new Uint8Array(leftoverByteRef.current.length + newBytes.length);
+          rawBytes.set(leftoverByteRef.current, 0);
+          rawBytes.set(newBytes, leftoverByteRef.current.length);
+          leftoverByteRef.current = null;
+        } else {
+          rawBytes = newBytes;
+        }
+
+        if (rawBytes.length % 2 !== 0) {
+          leftoverByteRef.current = rawBytes.slice(rawBytes.length - 1);
+          rawBytes = rawBytes.subarray(0, rawBytes.length - 1);
+        }
+
+        if (rawBytes.length === 0) return;
+
+        // Convert 16-bit signed PCM (little-endian) to Float32 [-1.0, 1.0]
+        const numSamples = rawBytes.length / 2;
+        const dataView = new DataView(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength);
         const float32 = new Float32Array(numSamples);
         for (let i = 0; i < numSamples; i++) {
-          float32[i] = int16[i] / 32768.0;
+          float32[i] = dataView.getInt16(i * 2, true) / 32768.0;
         }
 
-        // Apply a gentle 0.5ms micro-fade (12 samples) at chunk boundaries to eliminate any discontinuity clicks
-        const fadeLen = Math.min(12, Math.floor(numSamples / 4));
-        for (let i = 0; i < fadeLen; i++) {
-          const factor = i / fadeLen;
-          float32[i] *= factor;
-          float32[numSamples - 1 - i] *= factor;
+        const ctx = ensureAudioContext();
+        ensurePcmPlayer(ctx);
+
+        // High quality linear interpolation resampling to match the hardware AudioContext sampleRate
+        let resampled: Float32Array;
+        if (ctx.sampleRate === sampleRate) {
+          resampled = float32;
+        } else {
+          const ratio = sampleRate / ctx.sampleRate;
+          const dstLength = Math.round(numSamples * (ctx.sampleRate / sampleRate));
+          resampled = new Float32Array(dstLength);
+          for (let i = 0; i < dstLength; i++) {
+            const pos = i * ratio;
+            const idx = Math.floor(pos);
+            const frac = pos - idx;
+            const s0 = idx < numSamples ? float32[idx] : float32[numSamples - 1];
+            const s1 = idx + 1 < numSamples ? float32[idx + 1] : s0;
+            resampled[i] = s0 + frac * (s1 - s0);
+          }
         }
 
-        const audioBuffer = ctx.createBuffer(1, float32.length, sampleRate);
-        audioBuffer.getChannelData(0).set(float32);
-
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
-
-        const currentTime = ctx.currentTime;
-        if (nextStartTimeRef.current < currentTime) {
-          nextStartTimeRef.current = currentTime + 0.05; // 50ms jitter buffer
-        }
-
-        source.start(nextStartTimeRef.current);
-        nextStartTimeRef.current += audioBuffer.duration;
-        audioQueueRef.current.push(source);
+        // Push continuous resampled audio into the FIFO stream queue
+        pcmQueueRef.current.push(resampled);
 
         playedAnyPcmRef.current = true;
         setIsPlaying(true);
         setIsPlaybackPaused(false);
-
-        source.onended = () => {
-          const idx = audioQueueRef.current.indexOf(source);
-          if (idx !== -1) audioQueueRef.current.splice(idx, 1);
-          if (audioQueueRef.current.length === 0) {
-            setIsPlaying(false);
-          }
-        };
       } catch (pcmErr) {
         console.warn('PCM streaming audio chunk error:', pcmErr);
       }
@@ -514,18 +618,26 @@ export function VoiceAgent({ data }: { data: any }) {
 
   // --- BARGE-IN & INTERRUPTION ---
   function stopAudioInternal() {
-    audioQueueRef.current.forEach((source) => {
-      try {
-        source.stop();
-        source.disconnect();
-      } catch (e) {}
-    });
-    audioQueueRef.current = [];
+    // Clear continuous PCM streaming queue
+    pcmQueueRef.current = [];
+    pcmQueueOffsetRef.current = 0;
+    leftoverByteRef.current = null;
+    isStreamingPlaybackStartedRef.current = false;
+    isStreamingTurnFinishedRef.current = false;
 
-    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
-      nextStartTimeRef.current = audioCtxRef.current.currentTime;
+    // Disconnect script node to release Web Audio processing immediately
+    if (scriptNodeRef.current) {
+      try {
+        scriptNodeRef.current.disconnect();
+      } catch (e) {}
+      scriptNodeRef.current = null;
     }
 
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {});
+    }
+
+    // Stop batch HTMLAudioElement if playing
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
