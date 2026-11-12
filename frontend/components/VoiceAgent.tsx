@@ -35,6 +35,92 @@ function pcmToWavBlob(pcmBytes: Uint8Array, sampleRate = 24000): Blob {
   return new Blob([wavHeader, pcmBytes as unknown as BlobPart], { type: 'audio/wav' });
 }
 
+// Dedicated AudioWorklet processor definition for jitter-free real-time streaming PCM playback
+const WORKLET_CODE = `
+class PcmStreamProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.queue = [];
+    this.offset = 0;
+    this.bufferedSamples = 0;
+    this.isPlaying = false;
+    this.minBuffer = 3600; // ~75ms at 48kHz for jitter protection
+
+    this.port.onmessage = (e) => {
+      const data = e.data;
+      if (!data) return;
+      if (data.type === 'chunk' && data.samples) {
+        this.queue.push(data.samples);
+        this.bufferedSamples += data.samples.length;
+      } else if (data.type === 'finish') {
+        this.minBuffer = 0;
+      } else if (data.type === 'clear') {
+        this.queue = [];
+        this.offset = 0;
+        this.bufferedSamples = 0;
+        this.isPlaying = false;
+        this.minBuffer = 3600;
+      }
+    };
+  }
+
+  process(inputs, outputs) {
+    const output = outputs[0];
+    if (!output || output.length === 0) return true;
+    const outL = output[0];
+    const outR = output.length > 1 ? output[1] : null;
+    const bufferSize = outL.length;
+
+    // Jitter pre-buffering check
+    if (!this.isPlaying) {
+      if (this.bufferedSamples >= this.minBuffer && this.queue.length > 0) {
+        this.isPlaying = true;
+      } else {
+        outL.fill(0);
+        if (outR) outR.fill(0);
+        return true;
+      }
+    }
+
+    let written = 0;
+    while (written < bufferSize && this.queue.length > 0) {
+      const chunk = this.queue[0];
+      const available = chunk.length - this.offset;
+      const needed = bufferSize - written;
+
+      if (available <= needed) {
+        outL.set(chunk.subarray(this.offset), written);
+        written += available;
+        this.bufferedSamples = Math.max(0, this.bufferedSamples - available);
+        this.queue.shift();
+        this.offset = 0;
+      } else {
+        outL.set(chunk.subarray(this.offset, this.offset + needed), written);
+        this.offset += needed;
+        this.bufferedSamples = Math.max(0, this.bufferedSamples - needed);
+        written += needed;
+      }
+    }
+
+    if (written < bufferSize) {
+      outL.fill(0, written);
+      if (this.queue.length === 0) {
+        this.isPlaying = false;
+        this.minBuffer = 3600;
+        this.port.postMessage({ type: 'empty' });
+      }
+    }
+
+    if (outR) {
+      outR.set(outL);
+    }
+
+    return true;
+  }
+}
+registerProcessor('pcm-stream-processor', PcmStreamProcessor);
+`;
+
 export function VoiceAgent({ data }: { data: any }) {
   const [recording, setRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -75,11 +161,9 @@ export function VoiceAgent({ data }: { data: any }) {
   const reconnectTimerRef = useRef<any>(null);
   const pingIntervalRef = useRef<any>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const scriptNodeRef = useRef<ScriptProcessorNode | null>(null);
-  const pcmQueueRef = useRef<Float32Array[]>([]);
-  const pcmQueueOffsetRef = useRef<number>(0);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const workletInitPromiseRef = useRef<Promise<AudioWorkletNode | null> | null>(null);
   const leftoverByteRef = useRef<Uint8Array | null>(null);
-  const isStreamingPlaybackStartedRef = useRef<boolean>(false);
   const isStreamingTurnFinishedRef = useRef<boolean>(false);
   const receivedPcmChunksRef = useRef<Uint8Array[]>([]);
   const playedAnyPcmRef = useRef<boolean>(false);
@@ -180,18 +264,68 @@ export function VoiceAgent({ data }: { data: any }) {
     isAgentSpeakingRef.current = isPlaying;
   }, [isPlaying]);
 
+  async function ensureAudioWorklet(ctx: AudioContext): Promise<AudioWorkletNode | null> {
+    if (workletNodeRef.current && workletNodeRef.current.context.state !== 'closed') {
+      return workletNodeRef.current;
+    }
+    if (workletInitPromiseRef.current) {
+      return workletInitPromiseRef.current;
+    }
+
+    workletInitPromiseRef.current = (async () => {
+      try {
+        if (!ctx.audioWorklet) {
+          console.warn('[VoiceAgent] AudioWorklet not supported on this browser context');
+          return null;
+        }
+
+        const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        try {
+          await ctx.audioWorklet.addModule(blobUrl);
+        } finally {
+          URL.revokeObjectURL(blobUrl);
+        }
+
+        const node = new AudioWorkletNode(ctx, 'pcm-stream-processor', {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+        });
+
+        node.port.onmessage = (event) => {
+          if (event.data?.type === 'empty') {
+            if (isStreamingTurnFinishedRef.current) {
+              setIsPlaying(false);
+              setIsPlaybackPaused(false);
+            }
+          }
+        };
+
+        node.connect(ctx.destination);
+        workletNodeRef.current = node;
+        return node;
+      } catch (err) {
+        console.warn('[VoiceAgent] AudioWorklet setup warning (falling back):', err);
+        return null;
+      } finally {
+        workletInitPromiseRef.current = null;
+      }
+    })();
+
+    return workletInitPromiseRef.current;
+  }
+
   function ensureAudioContext(): AudioContext {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      // Do not force sampleRate: 24000 on AudioContext constructor.
-      // In Windows WASAPI, passing 24000 forces the browser/OS audio mixer into an emulated software resampler mode
-      // that causes static, buzzing, and "hazy" distortion on Realtek and standard hardware devices.
-      // AudioContext uses the device's native hardware sample rate, and AudioBuffer handles 24000Hz cleanly.
+      // AudioContext uses the device's native hardware sample rate, and AudioBuffer / AudioWorklet handles PCM cleanly.
       audioCtxRef.current = new AudioCtx();
     }
     if (audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume().catch(() => {});
     }
+    ensureAudioWorklet(audioCtxRef.current).catch(() => {});
     return audioCtxRef.current;
   }
 
@@ -270,6 +404,12 @@ export function VoiceAgent({ data }: { data: any }) {
             setBusyStep('');
             isStreamingTurnFinishedRef.current = true;
             if (msg.conversation_id) setConversationId(msg.conversation_id);
+
+            if (workletNodeRef.current) {
+              try {
+                workletNodeRef.current.port.postMessage({ type: 'finish' });
+              } catch (e) {}
+            }
 
             let turnAudioUrl: string | null = null;
             // Assemble complete PCM buffer into standard playable WAV blob for replay
@@ -416,6 +556,18 @@ export function VoiceAgent({ data }: { data: any }) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
       stopAudioInternal();
+      if (workletNodeRef.current) {
+        try {
+          workletNodeRef.current.disconnect();
+        } catch (e) {}
+        workletNodeRef.current = null;
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+        try {
+          audioCtxRef.current.close();
+        } catch (e) {}
+        audioCtxRef.current = null;
+      }
     };
   }, []);
 
@@ -442,92 +594,7 @@ export function VoiceAgent({ data }: { data: any }) {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
 
-  // --- CONTINUOUS RAW PCM STREAM PLAYER (FIFO QUEUE) ---
-  function ensurePcmPlayer(ctx: AudioContext): ScriptProcessorNode {
-    if (scriptNodeRef.current) {
-      return scriptNodeRef.current;
-    }
-
-    // 2048 buffer size gives ~42.6ms buffer at 48kHz for low-latency, glitch-free audio
-    const node = ctx.createScriptProcessor(2048, 1, 2);
-    node.onaudioprocess = (event) => {
-      const outLeft = event.outputBuffer.getChannelData(0);
-      const hasRight = event.outputBuffer.numberOfChannels > 1;
-      const queue = pcmQueueRef.current;
-
-      // Jitter buffer pre-buffering check:
-      // Wait for at least ~120ms of audio (ctx.sampleRate * 0.12) before beginning playback,
-      // or start immediately if the backend turn is already finished.
-      if (!isStreamingPlaybackStartedRef.current) {
-        let totalBuffered = 0;
-        for (let j = 0; j < queue.length; j++) {
-          totalBuffered += queue[j].length;
-        }
-        totalBuffered -= pcmQueueOffsetRef.current;
-
-        const minBufferSamples = Math.round(ctx.sampleRate * 0.12);
-        if (totalBuffered >= minBufferSamples || isStreamingTurnFinishedRef.current) {
-          if (totalBuffered > 0) {
-            isStreamingPlaybackStartedRef.current = true;
-          }
-        }
-      }
-
-      if (!isStreamingPlaybackStartedRef.current || queue.length === 0) {
-        outLeft.fill(0);
-        if (hasRight) {
-          event.outputBuffer.getChannelData(1).fill(0);
-        }
-        if (isStreamingTurnFinishedRef.current && queue.length === 0) {
-          if (isStreamingPlaybackStartedRef.current) {
-            isStreamingPlaybackStartedRef.current = false;
-            setIsPlaying(false);
-            setIsPlaybackPaused(false);
-          }
-        }
-        return;
-      }
-
-      let written = 0;
-      while (written < outLeft.length && queue.length > 0) {
-        const chunk = queue[0];
-        const available = chunk.length - pcmQueueOffsetRef.current;
-        const needed = outLeft.length - written;
-
-        if (available <= needed) {
-          outLeft.set(chunk.subarray(pcmQueueOffsetRef.current), written);
-          written += available;
-          queue.shift();
-          pcmQueueOffsetRef.current = 0;
-        } else {
-          outLeft.set(
-            chunk.subarray(pcmQueueOffsetRef.current, pcmQueueOffsetRef.current + needed),
-            written
-          );
-          pcmQueueOffsetRef.current += needed;
-          written += needed;
-        }
-      }
-
-      if (written < outLeft.length) {
-        outLeft.fill(0, written);
-        if (isStreamingTurnFinishedRef.current && queue.length === 0) {
-          isStreamingPlaybackStartedRef.current = false;
-          setIsPlaying(false);
-          setIsPlaybackPaused(false);
-        }
-      }
-
-      if (hasRight) {
-        event.outputBuffer.getChannelData(1).set(outLeft);
-      }
-    };
-
-    node.connect(ctx.destination);
-    scriptNodeRef.current = node;
-    return node;
-  }
-
+  // --- REAL-TIME RAW PCM STREAM PLAYER (AUDIOWORKLET) ---
   async function queueAudioChunk(base64: string, mime: string, sampleRate = 24000) {
     if (mime === 'audio/pcm' || sampleRate) {
       try {
@@ -568,7 +635,7 @@ export function VoiceAgent({ data }: { data: any }) {
         }
 
         const ctx = ensureAudioContext();
-        ensurePcmPlayer(ctx);
+        const workletNode = await ensureAudioWorklet(ctx);
 
         // High quality linear interpolation resampling to match the hardware AudioContext sampleRate
         let resampled: Float32Array;
@@ -588,12 +655,16 @@ export function VoiceAgent({ data }: { data: any }) {
           }
         }
 
-        // Push continuous resampled audio into the FIFO stream queue
-        pcmQueueRef.current.push(resampled);
-
-        playedAnyPcmRef.current = true;
-        setIsPlaying(true);
-        setIsPlaybackPaused(false);
+        if (workletNode) {
+          // Zero-copy transfer of resampled audio buffer directly to dedicated audio thread
+          workletNode.port.postMessage(
+            { type: 'chunk', samples: resampled },
+            [resampled.buffer]
+          );
+          playedAnyPcmRef.current = true;
+          setIsPlaying(true);
+          setIsPlaybackPaused(false);
+        }
       } catch (pcmErr) {
         console.warn('PCM streaming audio chunk error:', pcmErr);
       }
@@ -618,19 +689,13 @@ export function VoiceAgent({ data }: { data: any }) {
 
   // --- BARGE-IN & INTERRUPTION ---
   function stopAudioInternal() {
-    // Clear continuous PCM streaming queue
-    pcmQueueRef.current = [];
-    pcmQueueOffsetRef.current = 0;
-    leftoverByteRef.current = null;
-    isStreamingPlaybackStartedRef.current = false;
     isStreamingTurnFinishedRef.current = false;
+    leftoverByteRef.current = null;
 
-    // Disconnect script node to release Web Audio processing immediately
-    if (scriptNodeRef.current) {
+    if (workletNodeRef.current) {
       try {
-        scriptNodeRef.current.disconnect();
+        workletNodeRef.current.port.postMessage({ type: 'clear' });
       } catch (e) {}
-      scriptNodeRef.current = null;
     }
 
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
