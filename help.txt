@@ -1,6 +1,7 @@
 https://chatgpt.com/c/6ac378c9-fc64-83ee-a424-97b815b6991b
 
 
+
 1. The 3 Layers of Knowledge
 Layer	Technology	What It Stores	Purpose
 1. Executive Profile & Verified Memories	PostgreSQL (executive_profiles, memories)
