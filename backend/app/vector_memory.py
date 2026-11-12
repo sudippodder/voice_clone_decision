@@ -11,7 +11,9 @@ STOPWORDS = {
     "what", "about", "the", "how", "are", "you", "can", "explain", "tell", "me",
     "is", "in", "of", "for", "to", "a", "an", "and", "or", "with", "this", "that",
     "does", "do", "we", "our", "it", "there", "please", "give", "any", "information",
-    "why", "when", "where", "which", "who", "whom", "whose", "their", "they", "them"
+    "why", "when", "where", "which", "who", "whom", "whose", "their", "they", "them",
+    "i", "my", "your", "yours", "us", "he", "she", "him", "her", "his", "say", "said",
+    "speak", "know"
 }
 
 def embed_text(content: str) -> list[float] | None:
@@ -193,8 +195,8 @@ def search_chunks(client_id: int, query: str, limit: int = 4, min_similarity: fl
                             if qw in doc_words or any(dw.startswith(stem) or qw.startswith(dw[:4]) for dw in doc_words if len(dw) >= 4):
                                 matched += 1
 
-                        # Require at least 2 keywords for multi-word queries, or 1 for single-word
-                        min_required = 1 if len(q_tokens) == 1 else (2 if len(q_tokens) <= 3 else max(2, int(len(q_tokens) * 0.5)))
+                        # Require 1 keyword for 1-2 word queries, or 50% (min 2) for longer queries
+                        min_required = 1 if len(q_tokens) <= 2 else max(2, int(len(q_tokens) * 0.5))
                         if matched >= min_required:
                             overlap_ratio = matched / len(q_tokens)
                             lex_sim = round(0.55 + 0.35 * overlap_ratio, 3)
