@@ -16,20 +16,31 @@ STOPWORDS = {
     "speak", "know"
 }
 
+_EMBED_CACHE: dict[str, list[float]] = {}
+
 def embed_text(content: str) -> list[float] | None:
-    if not settings.openai_api_key:
+    if not settings.openai_api_key or not content.strip():
         return None
+    cache_key = content.strip().lower()[:500]
+    if cache_key in _EMBED_CACHE:
+        return _EMBED_CACHE[cache_key]
     try:
         client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
         response = client.embeddings.create(model=settings.embedding_model, input=content[:8000])
-        return response.data[0].embedding
+        emb = response.data[0].embedding
+        if len(_EMBED_CACHE) > 500:
+            _EMBED_CACHE.clear()
+        _EMBED_CACHE[cache_key] = emb
+        return emb
     except Exception as err:
         if "connect" in str(err).lower():
             # Fallback in case of dead environment proxy
             direct_http = httpx.Client(trust_env=False, timeout=30.0)
             direct_client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, http_client=direct_http)
             response = direct_client.embeddings.create(model=settings.embedding_model, input=content[:8000])
-            return response.data[0].embedding
+            emb = response.data[0].embedding
+            _EMBED_CACHE[cache_key] = emb
+            return emb
         print(f"Warning: Failed to generate embedding: {err}")
         return None
 
@@ -121,60 +132,31 @@ def search_chunks(client_id: int, query: str, limit: int = 4, min_similarity: fl
         try:
             chunks_dict: dict[int, dict] = {}
 
-            # --- Strategy 1: Vector Search (pgvector or in-memory fallback) ---
-            if embedding is not None:
-                try:
-                    max_distance = 1.0 - min_similarity
-                    stmt = select(
-                        KnowledgeChunk,
-                        KnowledgeChunk.embedding.cosine_distance(embedding).label("distance")
-                    ).where(
-                        KnowledgeChunk.client_id == client_id,
-                        KnowledgeChunk.embedding.is_not(None),
-                        KnowledgeChunk.embedding.cosine_distance(embedding) <= max_distance
-                    ).order_by("distance").limit(limit * 2)
+            # Retrieve candidate knowledge chunks for this client
+            all_chunks = db.execute(select(KnowledgeChunk).where(
+                KnowledgeChunk.client_id == client_id
+            )).scalars().all()
 
-                    results = db.execute(stmt).all()
-                    for row in results:
-                        c = row.KnowledgeChunk
-                        sim = round(1.0 - float(row.distance), 3)
+            for c in all_chunks:
+                # 1. Semantic Vector Similarity (in-memory cosine similarity)
+                if embedding is not None and c.embedding:
+                    sim = _cosine_similarity(c.embedding, embedding)
+                    if sim >= min_similarity:
                         chunks_dict[c.id] = {
                             "id": c.id,
                             "source": c.source_name or "upload",
                             "content": c.content,
-                            "similarity": sim
+                            "similarity": round(sim, 3)
                         }
-                except Exception:
-                    db.rollback()
-                    # In-memory cosine similarity fallback
-                    rows = db.execute(select(KnowledgeChunk).where(
-                        KnowledgeChunk.client_id == client_id,
-                        KnowledgeChunk.embedding.is_not(None)
-                    )).scalars().all()
-                    for row in rows:
-                        if row.embedding:
-                            sim = _cosine_similarity(row.embedding, embedding)
-                            if sim >= min_similarity:
-                                chunks_dict[row.id] = {
-                                    "id": row.id,
-                                    "source": row.source_name or "upload",
-                                    "content": row.content,
-                                    "similarity": round(sim, 3)
-                                }
 
-            # --- Strategy 2: Resilient Lexical Matching across all chunks ---
-            if len(clean_q_phrase) >= 3:
-                all_chunks = db.execute(select(KnowledgeChunk).where(
-                    KnowledgeChunk.client_id == client_id
-                )).scalars().all()
-
-                for c in all_chunks:
+                # 2. Resilient Lexical Matching (exact phrase + stemmed keywords)
+                if len(clean_q_phrase) >= 3:
                     norm_content_alpha = re.sub(r"[^\w\s]", " ", c.content.lower())
                     norm_content_phrase = re.sub(r"\s+", " ", norm_content_alpha)
 
-                    # Case A: Exact phrase match (handles colons, dashes, newlines in headings)
+                    # Case A: Exact phrase match (e.g. section titles like "Stakeholder Responsibility")
                     if len(clean_q_phrase) >= 5 and clean_q_phrase in norm_content_phrase:
-                        exact_sim = 0.90
+                        exact_sim = 0.95
                         if c.id in chunks_dict:
                             chunks_dict[c.id]["similarity"] = max(chunks_dict[c.id]["similarity"], exact_sim)
                         else:
@@ -190,7 +172,6 @@ def search_chunks(client_id: int, query: str, limit: int = 4, min_similarity: fl
                         doc_words = set(norm_content_phrase.split())
                         matched = 0
                         for qw in q_tokens:
-                            # 4-5 char stem prefix (e.g. principle -> principles, apply -> applies/applying)
                             stem = qw[:5] if len(qw) >= 6 else (qw[:4] if len(qw) >= 4 else qw)
                             if qw in doc_words or any(dw.startswith(stem) or qw.startswith(dw[:4]) for dw in doc_words if len(dw) >= 4):
                                 matched += 1

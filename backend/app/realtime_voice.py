@@ -242,28 +242,21 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
             continue
         buffer += delta
 
-        # Check for sentence or clause boundaries:
-        # Match sentence end punctuation followed by whitespace OR at least 25 characters with terminal punctuation
-        if re.search(r"[\.\?!;\n](?:\s+|$)", buffer) or (len(buffer) > 70 and " " in buffer[-12:]):
-            match = re.search(r"^(.*?[\.\?!;\n])(?:\s+|$)(.*)$", buffer, re.DOTALL)
-            if match and len(match.group(1).strip()) > 3:
-                clause = match.group(1).strip()
-                buffer = match.group(2).strip()
-            elif len(buffer) > 70:
-                last_space = buffer.rfind(" ")
-                if last_space > 25:
-                    clause = buffer[:last_space].strip()
-                    buffer = buffer[last_space:].strip()
-                else:
-                    clause = ""
-            else:
-                clause = ""
+        # Check for natural sentence or grammatical clause boundaries:
+        # Match terminal punctuation (.?!;\n) or natural clause punctuation (,;:) when length >= 45
+        match = re.search(r"^(.*?[\.\?!;\n])(?:\s+|$)(.*)$", buffer, re.DOTALL)
+        if not match and len(buffer) >= 45:
+            match = re.search(r"^(.*?[,;:])\s+(.*)$", buffer, re.DOTALL)
 
+        if match and len(match.group(1).strip()) > 5:
+            clause = match.group(1).strip()
+            buffer = match.group(2).strip()
+            clause = re.sub(r"^(decision|direct answer|answer|response)\s*:\s*", "", clause, flags=re.IGNORECASE).strip()
+            if is_first_sentence and clause:
+                clause = clause[0].upper() + clause[1:]
+            is_first_sentence = False
             if clause:
-                clause = sanitize_response_node({"response": clause})["response"]
-                is_first_sentence = False
-                if clause:
-                    yield clause
+                yield clause
 
     if buffer.strip():
         clause = sanitize_response_node({"response": buffer.strip()})["response"]

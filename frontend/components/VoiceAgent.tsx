@@ -179,7 +179,11 @@ export function VoiceAgent({ data }: { data: any }) {
   function ensureAudioContext(): AudioContext {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      audioCtxRef.current = new AudioCtx({ sampleRate: 24000 });
+      // Do not force sampleRate: 24000 on AudioContext constructor.
+      // In Windows WASAPI, passing 24000 forces the browser/OS audio mixer into an emulated software resampler mode
+      // that causes static, buzzing, and "hazy" distortion on Realtek and standard hardware devices.
+      // AudioContext uses the device's native hardware sample rate, and AudioBuffer handles 24000Hz cleanly.
+      audioCtxRef.current = new AudioCtx();
     }
     if (audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume().catch(() => {});
@@ -451,6 +455,14 @@ export function VoiceAgent({ data }: { data: any }) {
           float32[i] = int16[i] / 32768.0;
         }
 
+        // Apply a gentle 0.5ms micro-fade (12 samples) at chunk boundaries to eliminate any discontinuity clicks
+        const fadeLen = Math.min(12, Math.floor(numSamples / 4));
+        for (let i = 0; i < fadeLen; i++) {
+          const factor = i / fadeLen;
+          float32[i] *= factor;
+          float32[numSamples - 1 - i] *= factor;
+        }
+
         const audioBuffer = ctx.createBuffer(1, float32.length, sampleRate);
         audioBuffer.getChannelData(0).set(float32);
 
@@ -460,7 +472,7 @@ export function VoiceAgent({ data }: { data: any }) {
 
         const currentTime = ctx.currentTime;
         if (nextStartTimeRef.current < currentTime) {
-          nextStartTimeRef.current = currentTime + 0.03; // 30ms jitter buffer
+          nextStartTimeRef.current = currentTime + 0.05; // 50ms jitter buffer
         }
 
         source.start(nextStartTimeRef.current);
