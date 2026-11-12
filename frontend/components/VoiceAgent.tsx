@@ -1,7 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getApiUrl, getWsUrl, getAdminKey } from '../utils/api';
+
+export type DiscussionTurn = {
+  id: string | number;
+  userText: string;
+  assistantText: string;
+  timestamp: string;
+  audioUrl?: string | null;
+};
 
 function pcmToWavBlob(pcmBytes: Uint8Array, sampleRate = 24000): Blob {
   const wavHeader = new ArrayBuffer(44);
@@ -27,14 +35,6 @@ function pcmToWavBlob(pcmBytes: Uint8Array, sampleRate = 24000): Blob {
   return new Blob([wavHeader, pcmBytes as unknown as BlobPart], { type: 'audio/wav' });
 }
 
-export interface DiscussionTurn {
-  id: string | number;
-  userText: string;
-  assistantText: string;
-  audioUrl?: string | null;
-  timestamp: string;
-}
-
 export function VoiceAgent({ data }: { data: any }) {
   const [recording, setRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -55,7 +55,8 @@ export function VoiceAgent({ data }: { data: any }) {
   // Discussion History & Pagination
   const [discussions, setDiscussions] = useState<DiscussionTurn[]>([]);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const responseRef = useRef<string>('');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [playingTurnId, setPlayingTurnId] = useState<string | number | null>(null);
 
   // Audio recording refs
   const mediaRef = useRef<MediaRecorder | null>(null);
@@ -77,60 +78,91 @@ export function VoiceAgent({ data }: { data: any }) {
   const recognitionRef = useRef<any>(null);
   const isAgentSpeakingRef = useRef<boolean>(false);
   const transcriptRef = useRef<string>('');
+  const responseRef = useRef<string>('');
 
-  // Load prior discussions on mount
+  // Load existing discussions from backend when component opens
   useEffect(() => {
-    async function loadPriorDiscussions() {
+    async function loadRecentConversation() {
       try {
         const res = await fetch(`${getApiUrl()}/api/clients/${data.client.id}/conversations`, {
           headers: { 'X-Admin-Key': getAdminKey() },
         });
         if (!res.ok) return;
         const convList = await res.json();
-        if (!convList || convList.length === 0) return;
-
-        const latestConv = convList[0];
-        setConversationId(latestConv.id);
-
-        const detailRes = await fetch(`${getApiUrl()}/api/clients/${data.client.id}/conversations/${latestConv.id}`, {
-          headers: { 'X-Admin-Key': getAdminKey() },
-        });
-        if (!detailRes.ok) return;
-        const detail = await detailRes.json();
-        const msgs = detail.messages || [];
-
-        const turns: DiscussionTurn[] = [];
-        for (let i = 0; i < msgs.length; i++) {
-          if (msgs[i].role === 'user') {
-            const userMsg = msgs[i];
-            const nextMsg = msgs[i + 1];
-            let astText = '';
-            let astAudio: string | null = null;
-            if (nextMsg && nextMsg.role === 'assistant') {
-              astText = nextMsg.text || '';
-              astAudio = nextMsg.audio_url || null;
-              i++;
+        if (Array.isArray(convList) && convList.length > 0) {
+          const latest = convList[0];
+          setConversationId(latest.id);
+          const detRes = await fetch(`${getApiUrl()}/api/clients/${data.client.id}/conversations/${latest.id}`, {
+            headers: { 'X-Admin-Key': getAdminKey() },
+          });
+          if (!detRes.ok) return;
+          const det = await detRes.json();
+          if (det.messages && Array.isArray(det.messages)) {
+            const pairs: DiscussionTurn[] = [];
+            const msgs = det.messages;
+            for (let i = 0; i < msgs.length; i++) {
+              if (msgs[i].role === 'user') {
+                const u = msgs[i];
+                const a = msgs[i + 1]?.role === 'assistant' ? msgs[i + 1] : null;
+                pairs.push({
+                  id: u.id || `hist-${i}`,
+                  userText: u.text,
+                  assistantText: a ? a.text : '',
+                  timestamp: u.created_at ? new Date(u.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+                  audioUrl: a?.audio_url ? `${getApiUrl()}${a.audio_url}` : null,
+                });
+                if (a) i++;
+              } else if (msgs[i].role === 'assistant') {
+                pairs.push({
+                  id: msgs[i].id || `hist-${i}`,
+                  userText: '',
+                  assistantText: msgs[i].text,
+                  timestamp: msgs[i].created_at ? new Date(msgs[i].created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+                  audioUrl: msgs[i].audio_url ? `${getApiUrl()}${msgs[i].audio_url}` : null,
+                });
+              }
             }
-            turns.push({
-              id: userMsg.id || `turn-${i}`,
-              userText: userMsg.text,
-              assistantText: astText,
-              audioUrl: astAudio,
-              timestamp: userMsg.created_at
-                ? new Date(userMsg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                : '',
-            });
+            if (pairs.length > 0) {
+              setDiscussions(pairs);
+              setCurrentPage(Math.ceil(pairs.length / 10));
+            }
           }
         }
-        if (turns.length > 0) {
-          setDiscussions(turns.reverse());
-        }
-      } catch (e) {
-        console.warn('[VoiceAgent] Failed to load prior discussions:', e);
+      } catch (err) {
+        console.warn('Could not load past conversation history', err);
       }
     }
-    loadPriorDiscussions();
+    loadRecentConversation();
   }, [data.client.id]);
+
+  function playTurnAudio(turnId: string | number, url: string) {
+    if (playingTurnId === turnId && isPlaying) {
+      stopAudio();
+      setPlayingTurnId(null);
+      return;
+    }
+    stopAudioInternal();
+    const audio = new Audio(url);
+    audioRef.current = audio;
+    setPlayingTurnId(turnId);
+    setIsPlaying(true);
+    setIsPlaybackPaused(false);
+    audio.onplay = () => {
+      setIsPlaying(true);
+      setIsPlaybackPaused(false);
+    };
+    audio.onended = () => {
+      setIsPlaying(false);
+      setIsPlaybackPaused(false);
+      setPlayingTurnId(null);
+    };
+    audio.onerror = () => {
+      setIsPlaying(false);
+      setIsPlaybackPaused(false);
+      setPlayingTurnId(null);
+    };
+    audio.play().catch(console.error);
+  }
 
   useEffect(() => {
     isAgentSpeakingRef.current = isPlaying;
@@ -222,7 +254,7 @@ export function VoiceAgent({ data }: { data: any }) {
             setBusyStep('');
             if (msg.conversation_id) setConversationId(msg.conversation_id);
 
-            let fullAudioUrl: string | null = null;
+            let turnAudioUrl: string | null = null;
             // Assemble complete PCM buffer into standard playable WAV blob for replay
             if (receivedPcmChunksRef.current.length > 0) {
               const totalBytes = receivedPcmChunksRef.current.reduce((acc, c) => acc + c.length, 0);
@@ -233,13 +265,14 @@ export function VoiceAgent({ data }: { data: any }) {
                 offset += chunk.length;
               }
               const wavBlob = pcmToWavBlob(merged, 24000);
-              fullAudioUrl = URL.createObjectURL(wavBlob);
-              setLastAudioUrl(fullAudioUrl);
+              const fullUrl = URL.createObjectURL(wavBlob);
+              turnAudioUrl = fullUrl;
+              setLastAudioUrl(fullUrl);
 
               // Auto-play fallback if Web Audio queue was blocked by browser policy
               if (!playedAnyPcmRef.current) {
                 stopAudioInternal();
-                const fallbackAudio = new Audio(fullAudioUrl);
+                const fallbackAudio = new Audio(fullUrl);
                 audioRef.current = fallbackAudio;
                 fallbackAudio.onplay = () => {
                   setIsPlaying(true);
@@ -250,29 +283,35 @@ export function VoiceAgent({ data }: { data: any }) {
                 };
                 fallbackAudio.play().catch(() => {});
               }
+            } else if (msg.assistant_audio_url) {
+              turnAudioUrl = `${getApiUrl()}${msg.assistant_audio_url}`;
+              setLastAudioUrl(turnAudioUrl);
             }
 
-            const finalUser = transcriptRef.current;
-            const finalAst = msg.full_response || responseRef.current;
-
-            if (finalUser || finalAst) {
-              setDiscussions((prev) => [
-                {
-                  id: Date.now(),
-                  userText: finalUser,
-                  assistantText: finalAst,
-                  audioUrl: fullAudioUrl,
-                  timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                },
-                ...prev,
-              ]);
-              setCurrentPage(1);
+            // Commit completed turn to discussion history
+            const finalAssistant = (msg.full_response || responseRef.current || '').trim();
+            const finalUser = (transcriptRef.current || '').trim();
+            if (finalUser || finalAssistant) {
+              const newTurn: DiscussionTurn = {
+                id: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                userText: finalUser,
+                assistantText: finalAssistant,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                audioUrl: turnAudioUrl,
+              };
+              setDiscussions((prev) => {
+                if (
+                  prev.length > 0 &&
+                  prev[prev.length - 1].userText === newTurn.userText &&
+                  prev[prev.length - 1].assistantText === newTurn.assistantText
+                ) {
+                  return prev;
+                }
+                const updated = [...prev, newTurn];
+                setCurrentPage(Math.ceil(updated.length / 10));
+                return updated;
+              });
             }
-
-            setTranscript('');
-            transcriptRef.current = '';
-            setResponse('');
-            responseRef.current = '';
           } else if (msg.type === 'interrupted') {
             stopAudioInternal();
             setBusy(false);
@@ -530,66 +569,40 @@ export function VoiceAgent({ data }: { data: any }) {
     audio.play().catch(() => {});
   }
 
-  function playAudioUrl(url: string) {
-    stopAudioInternal();
-    ensureAudioContext();
-    const finalUrl =
-      url.startsWith('http') || url.startsWith('data:') || url.startsWith('blob:')
-        ? url
-        : `${getApiUrl()}${url}`;
-    const audio = new Audio(finalUrl);
-    audioRef.current = audio;
-    audio.onplay = () => {
-      setIsPlaying(true);
-      setIsPlaybackPaused(false);
-    };
-    audio.onpause = () => {
-      if (audio.currentTime < audio.duration) {
-        setIsPlaybackPaused(true);
-        setIsPlaying(false);
-      }
-    };
-    audio.onended = () => {
-      setIsPlaying(false);
-      setIsPlaybackPaused(false);
-    };
-    audio.onerror = () => {
-      setIsPlaying(false);
-      setIsPlaybackPaused(false);
-    };
-    audio.play().catch(() => {});
-  }
-
-  function startNewConversation() {
-    stopAudioInternal();
-    setConversationId(null);
-    setDiscussions([]);
-    setTranscript('');
-    transcriptRef.current = '';
-    setResponse('');
-    responseRef.current = '';
-    setCurrentPage(1);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      connectWebSocket();
-    }
-  }
-
   // --- RECORDING & STREAMING CONTROLS ---
   async function startRecording() {
     setError('');
-    // Preserve any existing live turn in discussions before starting new recording
-    if (transcriptRef.current || responseRef.current) {
-      setDiscussions((prev) => [
-        {
-          id: Date.now(),
-          userText: transcriptRef.current,
-          assistantText: responseRef.current,
-          audioUrl: lastAudioUrl,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        },
-        ...prev,
-      ]);
+
+    // Ensure any previously completed exchange is safely committed to discussions so it NEVER vanishes
+    if (transcriptRef.current && responseRef.current) {
+      const uText = transcriptRef.current.trim();
+      const aText = responseRef.current.trim();
+      if (uText || aText) {
+        setDiscussions((prev) => {
+          if (
+            prev.length > 0 &&
+            prev[prev.length - 1].userText === uText &&
+            prev[prev.length - 1].assistantText === aText
+          ) {
+            return prev;
+          }
+          const updated = [
+            ...prev,
+            {
+              id: `turn-${Date.now()}`,
+              userText: uText,
+              assistantText: aText,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              audioUrl: lastAudioUrl,
+            },
+          ];
+          setCurrentPage(Math.ceil(updated.length / 10));
+          return updated;
+        });
+      }
     }
+
+    // Reset ONLY active live buffers for the incoming turn
     setTranscript('');
     transcriptRef.current = '';
     setResponse('');
@@ -801,38 +814,42 @@ export function VoiceAgent({ data }: { data: any }) {
       if (!r.ok) throw new Error(j.detail || 'Voice turn request failed');
 
       setConversationId(j.conversation_id);
-      const userText = transcriptRef.current || j.transcript || '';
-      const assistantText = j.response || '';
-      let audioUrl: string | null = null;
+      setTranscript(j.transcript || '');
+      transcriptRef.current = j.transcript || '';
+      setResponse(j.response || '');
+      responseRef.current = j.response || '';
 
+      let turnAudioUrl: string | null = null;
       if (j.audio_base64) {
-        audioUrl = `data:${j.mime_type || 'audio/mpeg'};base64,${j.audio_base64}`;
-        setLastAudioUrl(audioUrl);
+        turnAudioUrl = `data:${j.mime_type || 'audio/mpeg'};base64,${j.audio_base64}`;
+        setLastAudioUrl(turnAudioUrl);
         stopAudioInternal();
-        const audio = new Audio(audioUrl);
+        const audio = new Audio(turnAudioUrl);
         audioRef.current = audio;
         audio.onplay = () => setIsPlaying(true);
         audio.onended = () => setIsPlaying(false);
         await audio.play().catch(() => {});
+      } else if (j.audio_url) {
+        turnAudioUrl = `${getApiUrl()}${j.audio_url}`;
+        setLastAudioUrl(turnAudioUrl);
       }
 
-      if (userText || assistantText) {
-        setDiscussions((prev) => [
-          {
-            id: Date.now(),
-            userText,
-            assistantText,
-            audioUrl,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          },
-          ...prev,
-        ]);
-        setCurrentPage(1);
+      if (j.transcript || j.response) {
+        setDiscussions((prev) => {
+          const updated = [
+            ...prev,
+            {
+              id: `turn-${Date.now()}`,
+              userText: j.transcript || '',
+              assistantText: j.response || '',
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              audioUrl: turnAudioUrl,
+            },
+          ];
+          setCurrentPage(Math.ceil(updated.length / 10));
+          return updated;
+        });
       }
-      setTranscript('');
-      transcriptRef.current = '';
-      setResponse('');
-      responseRef.current = '';
     } catch (e: any) {
       setError(e.message || 'Voice request failed.');
     } finally {
@@ -846,21 +863,37 @@ export function VoiceAgent({ data }: { data: any }) {
     const query = (overrideText ?? textInput).trim();
     if (!query) return;
 
-    // Preserve any existing live turn in discussions before starting new text query
-    if ((transcriptRef.current && transcriptRef.current !== query) || responseRef.current) {
-      setDiscussions((prev) => [
-        {
-          id: Date.now(),
-          userText: transcriptRef.current,
-          assistantText: responseRef.current,
-          audioUrl: lastAudioUrl,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        },
-        ...prev,
-      ]);
+    setError('');
+
+    // Ensure any previously completed exchange is safely committed to discussions so it NEVER vanishes
+    if (transcriptRef.current && responseRef.current) {
+      const uText = transcriptRef.current.trim();
+      const aText = responseRef.current.trim();
+      if (uText || aText) {
+        setDiscussions((prev) => {
+          if (
+            prev.length > 0 &&
+            prev[prev.length - 1].userText === uText &&
+            prev[prev.length - 1].assistantText === aText
+          ) {
+            return prev;
+          }
+          const updated = [
+            ...prev,
+            {
+              id: `turn-${Date.now()}`,
+              userText: uText,
+              assistantText: aText,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              audioUrl: lastAudioUrl,
+            },
+          ];
+          setCurrentPage(Math.ceil(updated.length / 10));
+          return updated;
+        });
+      }
     }
 
-    setError('');
     setTranscript(query);
     transcriptRef.current = query;
     setTextInput('');
@@ -904,6 +937,28 @@ export function VoiceAgent({ data }: { data: any }) {
   }
 
   const isVoiceReady = Boolean(data.profile?.voice_authorized && data.profile?.voice_id);
+
+  // Pagination & Sorting calculations (10 discussions per page)
+  const ITEMS_PER_PAGE = 10;
+  const sortedDiscussions = useMemo(() => {
+    return sortOrder === 'desc' ? [...discussions].reverse() : discussions;
+  }, [discussions, sortOrder]);
+
+  const totalPages = Math.ceil(sortedDiscussions.length / ITEMS_PER_PAGE) || 1;
+  const safePage = Math.min(Math.max(currentPage, 1), totalPages);
+  const startIndex = (safePage - 1) * ITEMS_PER_PAGE;
+  const endIndex = Math.min(startIndex + ITEMS_PER_PAGE, sortedDiscussions.length);
+  const currentDiscussions = useMemo(() => {
+    return sortedDiscussions.slice(startIndex, endIndex);
+  }, [sortedDiscussions, startIndex, endIndex]);
+
+  // Is an active live turn currently in progress?
+  const isLiveTurnActive = Boolean(
+    recording ||
+    busy ||
+    (transcript && !discussions.some((d) => d.userText === transcript)) ||
+    (response && !discussions.some((d) => d.assistantText === response))
+  );
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -1220,194 +1275,197 @@ export function VoiceAgent({ data }: { data: any }) {
         )}
       </div>
 
-      {/* Live Active Turn (while speaking, transcribing, or streaming) */}
-      {(transcript || response || busy) && (
-        <div className="space-y-4 animate-fade-in">
-          <div className="text-xs font-bold uppercase tracking-wider text-violet-400 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-violet-400 animate-pulse" />
-            <span>Active Live Discussion</span>
+      {/* Active Live Turn Card (In-Progress Turn) */}
+      {isLiveTurnActive && (transcript || response || recording || busy) && (
+        <div className="card p-5 border-2 border-violet-500/50 bg-[#101526] shadow-xl shadow-violet-950/30 space-y-3 animate-fade-in">
+          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider">
+            <span className="flex items-center gap-2 text-violet-300">
+              <span className="w-2.5 h-2.5 rounded-full bg-violet-400 animate-ping" />
+              <span>Active Turn (In Progress)</span>
+            </span>
+            {recording && (
+              <span className="text-red-400 font-mono animate-pulse">● Recording Voice ({formatTime(recordSeconds)})</span>
+            )}
+            {busy && (
+              <span className="text-amber-400 font-mono animate-pulse">✦ AI Thinking & Streaming…</span>
+            )}
           </div>
 
-          {/* User Transcript Card */}
           {transcript && (
-            <div className="card p-5 border-l-4 border-l-slate-400 bg-[#0e1320]">
-              <div className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">
-                <span className="flex items-center gap-1.5">
-                  <span>👤</span> You said
-                </span>
-                {recording && (
-                  <span className="text-[11px] text-red-400 font-mono animate-pulse">● Live Transcribing…</span>
-                )}
+            <div className="p-4 rounded-xl bg-[#0a0e1a] border border-slate-800">
+              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                <span>👤</span> You said
               </div>
-              <p className="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">
-                {transcript}
-              </p>
+              <p className="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">{transcript}</p>
             </div>
           )}
 
-          {/* AI Executive Response Card */}
-          {(busy || response) && (
-            <div className="card p-5 border-l-4 border-l-violet-500 bg-[#121829] shadow-lg shadow-violet-950/20">
-              <div className="flex items-center justify-between text-xs font-bold text-violet-400 uppercase tracking-wider mb-2">
+          {response && (
+            <div className="p-4 rounded-xl bg-[#141b30] border border-violet-900/60">
+              <div className="flex items-center justify-between text-[11px] font-bold text-violet-400 uppercase tracking-wider mb-1">
                 <span className="flex items-center gap-1.5">
-                  <span className="text-sm">✦</span> {data.client.executive_name} (AI Twin)
+                  <span>✦</span> {data.client.executive_name} (AI Twin)
                 </span>
-                <div className="flex items-center gap-2">
-                  {isPlaying ? (
-                    <button
-                      type="button"
-                      onClick={stopAudio}
-                      className="text-[11px] text-red-300 hover:text-white flex items-center gap-1 bg-red-950/40 px-2 py-0.5 rounded border border-red-500/30"
-                    >
-                      <span>⏹️</span> Interrupt
-                    </button>
-                  ) : lastAudioUrl ? (
-                    <button
-                      type="button"
-                      onClick={replayAudio}
-                      className="text-[11px] text-violet-300 hover:text-white flex items-center gap-1 bg-violet-950/40 px-2 py-0.5 rounded border border-violet-500/30"
-                    >
-                      <span>▶️</span> Replay
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-              <p className="text-slate-100 text-sm leading-7 whitespace-pre-wrap font-normal">
-                {response || (
-                  <span className="text-slate-400 italic flex items-center gap-2">
-                    <span className="w-3.5 h-3.5 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-                    {busyStep || 'Executive reasoning from database records…'}
-                  </span>
+                {isPlaying && (
+                  <button
+                    type="button"
+                    onClick={stopAudio}
+                    className="text-[11px] text-red-300 hover:text-white flex items-center gap-1 bg-red-950/40 px-2 py-0.5 rounded border border-red-500/30 font-medium"
+                  >
+                    <span>⏹️</span> Interrupt
+                  </button>
                 )}
-              </p>
+              </div>
+              <p className="text-slate-100 text-sm leading-7 whitespace-pre-wrap">{response}</p>
             </div>
           )}
         </div>
       )}
 
       {/* Discussion History Feed & Pagination */}
-      {discussions.length > 0 && (() => {
-        const ITEMS_PER_PAGE = 10;
-        const totalPages = Math.ceil(discussions.length / ITEMS_PER_PAGE) || 1;
-        const safePage = Math.min(Math.max(currentPage, 1), totalPages);
-        const startIndex = (safePage - 1) * ITEMS_PER_PAGE;
-        const currentDiscussions = discussions.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+      <div className="space-y-4">
+        {/* Discussion History Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-[#0d1220] rounded-2xl border border-[#232b3e]">
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+              <span>💬</span>
+              <span>Discussion History</span>
+            </h3>
+            <span className="text-xs px-2.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30 font-bold">
+              {discussions.length} {discussions.length === 1 ? 'Discussion' : 'Discussions'}
+            </span>
+          </div>
 
-        return (
-          <div className="space-y-4 pt-4 border-t border-slate-800/80">
-            {/* Header & Controls */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <span className="text-base">💬</span>
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                  Previous Discussions
-                </h3>
-                <span className="text-xs px-2.5 py-0.5 rounded-full bg-violet-950/70 border border-violet-700/50 text-violet-300 font-bold">
-                  {discussions.length} {discussions.length === 1 ? 'Discussion' : 'Discussions'}
-                </span>
-              </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Sort Toggle */}
+            <button
+              type="button"
+              onClick={() => {
+                setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+                setCurrentPage(1);
+              }}
+              className="text-xs px-2.5 py-1.5 rounded-lg bg-[#161d2d] border border-[#2b354c] text-slate-300 hover:text-white flex items-center gap-1 font-medium transition"
+              title="Toggle discussion sort order"
+            >
+              <span>{sortOrder === 'asc' ? '↓ Oldest First' : '↑ Newest First'}</span>
+            </button>
 
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={startNewConversation}
-                  className="text-xs px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 flex items-center gap-1.5 transition font-semibold"
-                  title="Clear current thread and start a fresh session"
-                >
-                  <span className="text-sm leading-none font-bold">+</span>
-                  <span>New Session</span>
-                </button>
-              </div>
-            </div>
+            {/* Start New Conversation / Clear */}
+            <button
+              type="button"
+              onClick={() => {
+                if (discussions.length === 0 || window.confirm('Start a fresh conversation? This clears the on-screen discussion history.')) {
+                  stopAudioInternal();
+                  setDiscussions([]);
+                  setConversationId(null);
+                  setTranscript('');
+                  transcriptRef.current = '';
+                  setResponse('');
+                  responseRef.current = '';
+                  setCurrentPage(1);
+                }
+              }}
+              className="text-xs px-2.5 py-1.5 rounded-lg bg-[#1a1528] border border-violet-800/40 text-violet-300 hover:text-white hover:bg-violet-900/40 flex items-center gap-1 font-semibold transition"
+              title="Start a fresh conversation"
+            >
+              <span>+ New Session</span>
+            </button>
+          </div>
+        </div>
 
-            {/* Discussion List */}
-            <div className="space-y-4">
-              {currentDiscussions.map((turn, idx) => (
+        {/* Discussion Items List */}
+        {discussions.length === 0 && !isLiveTurnActive ? (
+          <div className="p-8 text-center text-xs text-slate-500 border border-dashed border-[#252d40] rounded-2xl bg-[#0a0e1a]/50">
+            No previous discussions in this session yet. Click <strong className="text-slate-400">&quot;Start Talking&quot;</strong> or type a message below to begin.
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {currentDiscussions.map((turn, idx) => {
+              const globalIndex = sortOrder === 'asc' ? startIndex + idx + 1 : sortedDiscussions.length - (startIndex + idx);
+              const isPlayingThis = isPlaying && playingTurnId === turn.id;
+
+              return (
                 <div
                   key={turn.id}
-                  className="p-5 rounded-2xl bg-[#0d1220] border border-slate-800/90 shadow-md space-y-3.5 transition hover:border-slate-700"
+                  className="card p-5 border border-slate-800/80 bg-[#0e1424] space-y-3.5 shadow-md hover:border-slate-700 transition"
                 >
-                  {/* Discussion Header */}
                   <div className="flex items-center justify-between text-xs text-slate-400 border-b border-slate-800/60 pb-2">
-                    <span className="font-semibold text-slate-300">
-                      Discussion #{discussions.length - (startIndex + idx)}
-                    </span>
-                    <div className="flex items-center gap-3">
-                      {turn.timestamp && <span className="font-mono text-[11px] text-slate-500">{turn.timestamp}</span>}
-                      {turn.audioUrl && (
-                        <button
-                          type="button"
-                          onClick={() => playAudioUrl(turn.audioUrl!)}
-                          className="text-xs px-2.5 py-1 rounded bg-violet-950/40 hover:bg-violet-900/60 text-violet-300 hover:text-white border border-violet-500/30 flex items-center gap-1.5 transition font-medium"
-                          title="Play assistant response audio"
-                        >
-                          <span>▶</span>
-                          <span>Play Audio</span>
-                        </button>
-                      )}
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-violet-950/60 text-violet-300 border border-violet-800/40 font-bold">
+                        #{globalIndex}
+                      </span>
+                      {turn.timestamp && <span>{turn.timestamp}</span>}
                     </div>
+
+                    {turn.audioUrl && (
+                      <button
+                        type="button"
+                        onClick={() => playTurnAudio(turn.id, turn.audioUrl!)}
+                        className={`text-xs px-2.5 py-1 rounded-lg border flex items-center gap-1.5 transition font-medium ${
+                          isPlayingThis
+                            ? 'bg-red-950/60 border-red-500/50 text-red-300 hover:bg-red-900/60'
+                            : 'bg-violet-950/40 border-violet-700/40 text-violet-300 hover:text-white hover:bg-violet-900/50'
+                        }`}
+                      >
+                        <span>{isPlayingThis ? '⏹️' : '▶️'}</span>
+                        <span>{isPlayingThis ? 'Stop Audio' : 'Replay Voice'}</span>
+                      </button>
+                    )}
                   </div>
 
-                  {/* User Query */}
                   {turn.userText && (
-                    <div className="flex items-start gap-3">
-                      <span className="text-base select-none mt-0.5">👤</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">You said</div>
-                        <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">{turn.userText}</p>
+                    <div className="p-4 rounded-xl bg-[#0b101c] border-l-4 border-l-slate-400 border border-slate-800/80">
+                      <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                        <span>👤</span> You said
                       </div>
+                      <p className="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">{turn.userText}</p>
                     </div>
                   )}
 
-                  {/* Assistant Answer */}
                   {turn.assistantText && (
-                    <div className="flex items-start gap-3 pt-2.5 border-t border-slate-800/50">
-                      <span className="text-base text-violet-400 select-none mt-0.5">✦</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-violet-400 mb-0.5">
-                          {data.client.executive_name} (AI Twin)
-                        </div>
-                        <p className="text-sm text-slate-100 leading-relaxed whitespace-pre-wrap font-normal">
-                          {turn.assistantText}
-                        </p>
+                    <div className="p-4 rounded-xl bg-[#13192c] border-l-4 border-l-violet-500 border border-violet-950/60 shadow-md">
+                      <div className="text-[11px] font-bold text-violet-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+                        <span>✦</span> {data.client.executive_name} (AI Twin)
                       </div>
+                      <p className="text-slate-100 text-sm leading-7 whitespace-pre-wrap font-normal">
+                        {turn.assistantText}
+                      </p>
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
+              );
+            })}
 
-            {/* Pagination (> 10 items) */}
-            {discussions.length > ITEMS_PER_PAGE && (
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-slate-800 text-xs text-slate-400">
-                <div>
-                  Showing <strong className="text-slate-200">{startIndex + 1}</strong> to{' '}
-                  <strong className="text-slate-200">{Math.min(startIndex + ITEMS_PER_PAGE, discussions.length)}</strong> of{' '}
-                  <strong className="text-slate-200">{discussions.length}</strong> discussions
-                </div>
+            {/* Pagination Controls Bar (Shows when discussions > 10) */}
+            {totalPages > 1 && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-3 bg-[#0d1220] rounded-2xl border border-[#232b3e] text-xs">
+                <span className="text-slate-400">
+                  Showing <strong className="text-white">{startIndex + 1}–{endIndex}</strong> of{' '}
+                  <strong className="text-white">{discussions.length}</strong> discussions
+                </span>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap">
                   <button
                     type="button"
                     onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
                     disabled={safePage === 1}
-                    className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-300 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    className="btn btn-secondary px-3 py-1.5 text-xs disabled:opacity-40"
                   >
-                    ‹ Previous
+                    ◀ Previous
                   </button>
 
-                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
+                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
                     <button
-                      key={p}
+                      key={pageNum}
                       type="button"
-                      onClick={() => setCurrentPage(p)}
-                      className={`w-8 h-8 rounded-lg text-xs font-bold transition ${
-                        safePage === p
+                      onClick={() => setCurrentPage(pageNum)}
+                      className={`px-3 py-1.5 rounded-lg font-bold text-xs transition ${
+                        pageNum === safePage
                           ? 'bg-violet-600 text-white shadow-md shadow-violet-950/60'
-                          : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                          : 'bg-[#151c2c] text-slate-400 hover:text-white hover:bg-slate-800 border border-[#273248]'
                       }`}
                     >
-                      {p}
+                      {pageNum}
                     </button>
                   ))}
 
@@ -1415,16 +1473,16 @@ export function VoiceAgent({ data }: { data: any }) {
                     type="button"
                     onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))}
                     disabled={safePage === totalPages}
-                    className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-300 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    className="btn btn-secondary px-3 py-1.5 text-xs disabled:opacity-40"
                   >
-                    Next ›
+                    Next ▶
                   </button>
                 </div>
               </div>
             )}
           </div>
-        );
-      })()}
+        )}
+      </div>
     </div>
   );
 }
