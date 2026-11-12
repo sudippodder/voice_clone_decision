@@ -46,21 +46,35 @@ class PcmStreamProcessor extends AudioWorkletProcessor {
     this.ratio = 24000.0 / sampleRate;
     this.isPlaying = false;
     this.isFinished = false;
+    this.hasStarted = false;
+    this.bufferedSamples = 0;
+    // 250ms pre-buffer cushion (6000 samples at 24kHz) prevents internet packet jitter starvation
+    this.prebufferTarget = Math.round(24000 * 0.25);
+    this.underruns = 0;
 
     this.port.onmessage = (e) => {
       const data = e.data;
       if (!data) return;
       if (data.type === 'chunk' && data.samples) {
         this.queue.push(data.samples);
-        this.isPlaying = true;
+        this.bufferedSamples += data.samples.length;
+        if (this.bufferedSamples >= this.prebufferTarget || this.isFinished) {
+          this.hasStarted = true;
+          this.isPlaying = true;
+        }
       } else if (data.type === 'finish') {
         this.isFinished = true;
+        this.hasStarted = true;
       } else if (data.type === 'clear') {
         this.queue = [];
         this.currentChunk = null;
         this.phase = 0.0;
         this.isPlaying = false;
         this.isFinished = false;
+        this.hasStarted = false;
+        this.bufferedSamples = 0;
+        this.underruns = 0;
+        this.prebufferTarget = Math.round(24000 * 0.25);
       }
     };
   }
@@ -71,6 +85,13 @@ class PcmStreamProcessor extends AudioWorkletProcessor {
     const outL = output[0];
     const outR = output.length > 1 ? output[1] : null;
     const bufferSize = outL.length;
+
+    // While prebuffering initial cushion, output zero
+    if (!this.hasStarted) {
+      outL.fill(0);
+      if (outR) outR.fill(0);
+      return true;
+    }
 
     let written = 0;
     while (written < bufferSize) {
@@ -103,6 +124,7 @@ class PcmStreamProcessor extends AudioWorkletProcessor {
       this.phase += this.ratio;
 
       if (this.phase >= chunkLen) {
+        this.bufferedSamples -= chunkLen;
         this.phase -= chunkLen;
         if (this.queue.length > 0) {
           this.currentChunk = this.queue.shift();
@@ -115,9 +137,21 @@ class PcmStreamProcessor extends AudioWorkletProcessor {
 
     if (written < bufferSize) {
       outL.fill(0, written);
-      if (this.isFinished && this.queue.length === 0 && !this.currentChunk && this.isPlaying) {
+      if (this.isPlaying && !this.isFinished) {
+        // Buffer starvation (underrun) due to network packet delay
+        this.underruns++;
+        this.port.postMessage({
+          type: 'underrun',
+          count: this.underruns,
+          bufferedMs: Math.round((Math.max(0, this.bufferedSamples) / 24000) * 1000),
+        });
+        // Briefly cushion for 150ms before resuming to prevent rapid click stutter
+        this.hasStarted = false;
+        this.prebufferTarget = Math.round(24000 * 0.15);
+      } else if (this.isFinished && this.queue.length === 0 && !this.currentChunk && this.isPlaying) {
         this.isPlaying = false;
         this.isFinished = false;
+        this.hasStarted = false;
         this.port.postMessage({ type: 'empty' });
       }
     }
@@ -155,6 +189,20 @@ export function VoiceAgent({ data }: { data: any }) {
   const noticeTimeoutRef = useRef<any>(null);
   const prevNetworkStatusRef = useRef<'strong' | 'weak' | 'poor' | 'offline'>('offline');
   const [textInput, setTextInput] = useState('');
+
+  // Audio Playback Engine & Diagnostics Telemetry
+  const [audioEngine, setAudioEngine] = useState<'worklet' | 'wav'>('worklet');
+  const audioEngineRef = useRef<'worklet' | 'wav'>('worklet');
+  useEffect(() => {
+    audioEngineRef.current = audioEngine;
+  }, [audioEngine]);
+  const [audioCtxState, setAudioCtxState] = useState<string>('uninitialized');
+  const [audioSampleRate, setAudioSampleRate] = useState<number | null>(null);
+  const [underrunCount, setUnderrunCount] = useState<number>(0);
+  const [turnChunkCount, setTurnChunkCount] = useState<number>(0);
+  const [turnByteCount, setTurnByteCount] = useState<number>(0);
+  const [lastTurnDurationSec, setLastTurnDurationSec] = useState<number | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
 
   // Discussion History & Pagination (default to newest first)
   const [discussions, setDiscussions] = useState<DiscussionTurn[]>([]);
@@ -315,6 +363,8 @@ export function VoiceAgent({ data }: { data: any }) {
           if (event.data?.type === 'empty') {
             setIsPlaying(false);
             setIsPlaybackPaused(false);
+          } else if (event.data?.type === 'underrun') {
+            setUnderrunCount(event.data.count || 1);
           }
         };
 
@@ -335,14 +385,45 @@ export function VoiceAgent({ data }: { data: any }) {
   function ensureAudioContext(): AudioContext {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      // AudioContext uses the device's native hardware sample rate, and AudioBuffer / AudioWorklet handles PCM cleanly.
-      audioCtxRef.current = new AudioCtx();
+      const ctx = new AudioCtx();
+      audioCtxRef.current = ctx;
+      setAudioCtxState(ctx.state);
+      setAudioSampleRate(ctx.sampleRate);
+      ctx.onstatechange = () => {
+        if (audioCtxRef.current) {
+          setAudioCtxState(audioCtxRef.current.state);
+        }
+      };
     }
     if (audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume().catch(() => {});
+      audioCtxRef.current.resume().then(() => {
+        if (audioCtxRef.current) setAudioCtxState(audioCtxRef.current.state);
+      }).catch(() => {});
     }
     ensureAudioWorklet(audioCtxRef.current).catch(() => {});
     return audioCtxRef.current;
+  }
+
+  function playTestTone() {
+    try {
+      const ctx = ensureAudioContext();
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      gain.gain.setValueAtTime(0.12, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 1.2);
+      showQualityNotice('info', 'Played 440Hz test chime directly to your audio hardware.');
+    } catch (err: any) {
+      showQualityNotice('error', `Audio test failed: ${err.message}`);
+    }
   }
 
   function showQualityNotice(type: 'warn' | 'error' | 'info', message: string) {
@@ -515,12 +596,36 @@ export function VoiceAgent({ data }: { data: any }) {
               turnAudioUrl = fullUrl;
               setLastAudioUrl(fullUrl);
 
-              // Calculate audio duration in seconds to cleanly reset isPlaying when speech completes
               const totalSeconds = totalBytes / (24000 * 2);
-              setTimeout(() => {
-                setIsPlaying(false);
+              setLastTurnDurationSec(parseFloat(totalSeconds.toFixed(2)));
+
+              if (audioEngineRef.current === 'wav') {
+                stopAudioInternal();
+                const audio = new Audio(fullUrl);
+                audioRef.current = audio;
+                setPlayingTurnId(null);
+                setIsPlaying(true);
                 setIsPlaybackPaused(false);
-              }, Math.max(500, Math.round((totalSeconds + 0.3) * 1000)));
+                audio.onplay = () => {
+                  setIsPlaying(true);
+                  setIsPlaybackPaused(false);
+                };
+                audio.onended = () => {
+                  setIsPlaying(false);
+                  setIsPlaybackPaused(false);
+                };
+                audio.onerror = () => {
+                  setIsPlaying(false);
+                  setIsPlaybackPaused(false);
+                };
+                audio.play().catch(console.error);
+              } else {
+                // Calculate audio duration in seconds to cleanly reset isPlaying when speech completes
+                setTimeout(() => {
+                  setIsPlaying(false);
+                  setIsPlaybackPaused(false);
+                }, Math.max(500, Math.round((totalSeconds + 0.3) * 1000)));
+              }
             } else {
               setIsPlaying(false);
               setIsPlaybackPaused(false);
@@ -709,8 +814,15 @@ export function VoiceAgent({ data }: { data: any }) {
           newBytes[i] = binaryString.charCodeAt(i);
         }
 
-        // Store PCM bytes for replay WAV assembly
+        // Store PCM bytes for replay WAV assembly and Mode 2 playback
         receivedPcmChunksRef.current.push(newBytes);
+        setTurnChunkCount((c) => c + 1);
+        setTurnByteCount((b) => b + newBytes.length);
+
+        // If Mode 2 (Crystal-Clear WAV Engine) is selected, do NOT push to worklet (it will play as assembled WAV on finish)
+        if (audioEngineRef.current === 'wav') {
+          return;
+        }
 
         // Prepend any odd leftover byte from prior chunk to guarantee 16-bit 2-byte boundary alignment
         let rawBytes: Uint8Array;
@@ -903,9 +1015,16 @@ export function VoiceAgent({ data }: { data: any }) {
     shouldSendRef.current = true;
     receivedPcmChunksRef.current = [];
     playedAnyPcmRef.current = false;
+    setUnderrunCount(0);
+    setTurnChunkCount(0);
+    setTurnByteCount(0);
+    setLastTurnDurationSec(null);
 
     // Direct user gesture initializes Web Audio Context to bypass autoplay restrictions
-    ensureAudioContext();
+    const ctx = ensureAudioContext();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
 
     if (isAgentSpeakingRef.current) {
       stopAudio();
@@ -1200,8 +1319,15 @@ export function VoiceAgent({ data }: { data: any }) {
     responseRef.current = '';
     receivedPcmChunksRef.current = [];
     playedAnyPcmRef.current = false;
+    setUnderrunCount(0);
+    setTurnChunkCount(0);
+    setTurnByteCount(0);
+    setLastTurnDurationSec(null);
     stopAudioInternal();
-    ensureAudioContext();
+    const ctx = ensureAudioContext();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
 
     setBusy(true);
     setBusyStep('Executive reasoning from database records…');
@@ -1600,6 +1726,155 @@ export function VoiceAgent({ data }: { data: any }) {
             {busy ? '…' : 'Ask'}
           </button>
         </form>
+
+        {/* Interactive Audio Engine & Diagnostics Drawer */}
+        <div className="mt-6 pt-4 border-t border-[#1c2438]">
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setShowDiagnostics((prev) => !prev)}
+              className="text-xs font-mono text-slate-400 hover:text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <span>{showDiagnostics ? '▼' : '▶'}</span>
+              <span>🛠️ Audio Diagnostics &amp; Playback Engine</span>
+              {underrunCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded bg-red-950/80 border border-red-500/50 text-red-300 text-[10px] animate-pulse">
+                  {underrunCount} underrun{underrunCount > 1 ? 's' : ''}
+                </span>
+              )}
+            </button>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={playTestTone}
+                className="text-[11px] font-medium text-slate-300 hover:text-white px-2.5 py-1 rounded bg-[#172033] hover:bg-[#202c46] border border-slate-700 transition flex items-center gap-1 cursor-pointer"
+                title="Play 440Hz test sine tone to verify speaker / DAC clarity"
+              >
+                <span>🔊</span> Test Chime
+              </button>
+
+              {lastAudioUrl && (
+                <a
+                  href={lastAudioUrl}
+                  download={`voice-${data.client.executive_name.replace(/\s+/g, '_')}-${Date.now()}.wav`}
+                  className="text-[11px] font-medium text-emerald-300 hover:text-white px-2.5 py-1 rounded bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-500/40 transition flex items-center gap-1 cursor-pointer"
+                  title="Download raw audio WAV file received from stream"
+                >
+                  <span>📥</span> Download WAV
+                </a>
+              )}
+            </div>
+          </div>
+
+          {showDiagnostics && (
+            <div className="mt-3 p-4 rounded-xl bg-[#0b0f1a] border border-[#232d42] text-left space-y-4 animate-fade-in text-xs">
+              {/* Engine Mode Selection */}
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
+                  Playback Engine Mode
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAudioEngine('worklet');
+                      showQualityNotice('info', 'Switched to Streaming AudioWorklet with 250ms anti-jitter buffer.');
+                    }}
+                    className={`p-2.5 rounded-lg border text-left transition flex flex-col gap-1 cursor-pointer ${
+                      audioEngine === 'worklet'
+                        ? 'bg-violet-950/50 border-violet-500/80 text-violet-200'
+                        : 'bg-[#121826] border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold flex items-center gap-1.5">
+                        <span>⚡</span> Real-Time Worklet
+                      </span>
+                      {audioEngine === 'worklet' && (
+                        <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded font-bold">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-400 leading-normal">
+                      Ultra low-latency streaming with 250ms anti-jitter buffer. Best for fast back-and-forth dialogue.
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAudioEngine('wav');
+                      showQualityNotice('info', 'Switched to Crystal-Clear WAV Engine (identical to Replay).');
+                    }}
+                    className={`p-2.5 rounded-lg border text-left transition flex flex-col gap-1 cursor-pointer ${
+                      audioEngine === 'wav'
+                        ? 'bg-emerald-950/50 border-emerald-500/80 text-emerald-200'
+                        : 'bg-[#121826] border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold flex items-center gap-1.5">
+                        <span>💎</span> Crystal-Clear WAV Engine
+                      </span>
+                      {audioEngine === 'wav' && (
+                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-bold">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-400 leading-normal">
+                      Plays assembled audio through native HTML5 audio element. 100% immune to network jitter and worklet stutter.
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Telemetry Grid */}
+              <div className="pt-2 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-[11px]">
+                <div className="p-2 rounded bg-[#101625] border border-slate-800">
+                  <div className="text-slate-500 text-[10px] uppercase">AudioContext</div>
+                  <div className={`font-semibold mt-0.5 ${audioCtxState === 'running' ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {audioCtxState || 'uninitialized'}
+                  </div>
+                </div>
+
+                <div className="p-2 rounded bg-[#101625] border border-slate-800">
+                  <div className="text-slate-500 text-[10px] uppercase">Device DAC Rate</div>
+                  <div className="font-semibold text-slate-200 mt-0.5">
+                    {audioSampleRate ? `${audioSampleRate.toLocaleString()} Hz` : 'Detecting…'}
+                  </div>
+                </div>
+
+                <div className="p-2 rounded bg-[#101625] border border-slate-800">
+                  <div className="text-slate-500 text-[10px] uppercase">Jitter Underruns</div>
+                  <div className={`font-semibold mt-0.5 ${underrunCount === 0 ? 'text-emerald-400' : 'text-red-400 animate-pulse'}`}>
+                    {underrunCount === 0 ? '0 (Pristine)' : `${underrunCount} (Stutters)`}
+                  </div>
+                </div>
+
+                <div className="p-2 rounded bg-[#101625] border border-slate-800">
+                  <div className="text-slate-500 text-[10px] uppercase">Last Audio Turn</div>
+                  <div className="font-semibold text-slate-200 mt-0.5 truncate">
+                    {turnChunkCount > 0 ? `${turnChunkCount} chk • ${(turnByteCount / 1024).toFixed(0)}KB` : 'None'}
+                    {lastTurnDurationSec ? ` (${lastTurnDurationSec}s)` : ''}
+                  </div>
+                </div>
+              </div>
+
+              {/* Debug Advice Banner */}
+              <div className="text-[11px] text-slate-400 leading-relaxed bg-[#131a2c] p-2.5 rounded-lg border border-slate-800">
+                <strong className="text-slate-200">Diagnostics Guide:</strong>
+                <ul className="list-disc list-inside mt-1 space-y-0.5 text-slate-400">
+                  <li>If live sound ever feels buzzy or hazy, check the <strong>Jitter Underruns</strong> counter above. If it is &gt; 0, network packet delays caused buffer starvation.</li>
+                  <li>Switching to <strong>💎 Crystal-Clear WAV Engine</strong> eliminates all buffer underruns and plays with 100% pristine Replay clarity.</li>
+                  <li>Click <strong>🔊 Test Chime</strong> to verify your computer speakers/headphones with a pure 440Hz tone.</li>
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Missing Voice Warning Notice */}
         {!isVoiceReady && (
