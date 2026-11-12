@@ -103,3 +103,8 @@ Latency: 600ms – 900ms (sub-second Time-to-First-Audio). Full Barge-in / Inter
 
 Username: admin
 Password: pass123
+
+
+
+pm2 restart voiceclone --update-env
+

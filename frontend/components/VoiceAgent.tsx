@@ -52,10 +52,14 @@ export function VoiceAgent({ data }: { data: any }) {
   const [wsStatusMsg, setWsStatusMsg] = useState('');
   const [textInput, setTextInput] = useState('');
 
-  // Discussion History & Pagination
+  // Discussion History & Pagination (default to newest first)
   const [discussions, setDiscussions] = useState<DiscussionTurn[]>([]);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const sortOrderRef = useRef<'asc' | 'desc'>('desc');
+  useEffect(() => {
+    sortOrderRef.current = sortOrder;
+  }, [sortOrder]);
   const [playingTurnId, setPlayingTurnId] = useState<string | number | null>(null);
 
   // Audio recording refs
@@ -124,7 +128,11 @@ export function VoiceAgent({ data }: { data: any }) {
             }
             if (pairs.length > 0) {
               setDiscussions(pairs);
-              setCurrentPage(Math.ceil(pairs.length / 10));
+              if (sortOrderRef.current === 'desc') {
+                setCurrentPage(1);
+              } else {
+                setCurrentPage(Math.ceil(pairs.length / 10));
+              }
             }
           }
         }
@@ -308,7 +316,11 @@ export function VoiceAgent({ data }: { data: any }) {
                   return prev;
                 }
                 const updated = [...prev, newTurn];
-                setCurrentPage(Math.ceil(updated.length / 10));
+                if (sortOrderRef.current === 'desc') {
+                  setCurrentPage(1);
+                } else {
+                  setCurrentPage(Math.ceil(updated.length / 10));
+                }
                 return updated;
               });
             }
@@ -596,7 +608,11 @@ export function VoiceAgent({ data }: { data: any }) {
               audioUrl: lastAudioUrl,
             },
           ];
-          setCurrentPage(Math.ceil(updated.length / 10));
+          if (sortOrderRef.current === 'desc') {
+            setCurrentPage(1);
+          } else {
+            setCurrentPage(Math.ceil(updated.length / 10));
+          }
           return updated;
         });
       }
@@ -846,7 +862,11 @@ export function VoiceAgent({ data }: { data: any }) {
               audioUrl: turnAudioUrl,
             },
           ];
-          setCurrentPage(Math.ceil(updated.length / 10));
+          if (sortOrderRef.current === 'desc') {
+            setCurrentPage(1);
+          } else {
+            setCurrentPage(Math.ceil(updated.length / 10));
+          }
           return updated;
         });
       }
@@ -888,7 +908,11 @@ export function VoiceAgent({ data }: { data: any }) {
               audioUrl: lastAudioUrl,
             },
           ];
-          setCurrentPage(Math.ceil(updated.length / 10));
+          if (sortOrderRef.current === 'desc') {
+            setCurrentPage(1);
+          } else {
+            setCurrentPage(Math.ceil(updated.length / 10));
+          }
           return updated;
         });
       }
