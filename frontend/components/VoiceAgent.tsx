@@ -35,31 +35,32 @@ function pcmToWavBlob(pcmBytes: Uint8Array, sampleRate = 24000): Blob {
   return new Blob([wavHeader, pcmBytes as unknown as BlobPart], { type: 'audio/wav' });
 }
 
-// Dedicated AudioWorklet processor definition for jitter-free real-time streaming PCM playback
+// Dedicated AudioWorklet processor definition for seamless real-time streaming PCM playback
 const WORKLET_CODE = `
 class PcmStreamProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.queue = [];
-    this.offset = 0;
-    this.bufferedSamples = 0;
+    this.currentChunk = null;
+    this.phase = 0.0;
+    this.ratio = 24000.0 / sampleRate;
     this.isPlaying = false;
-    this.minBuffer = 3600; // ~75ms at 48kHz for jitter protection
+    this.isFinished = false;
 
     this.port.onmessage = (e) => {
       const data = e.data;
       if (!data) return;
       if (data.type === 'chunk' && data.samples) {
         this.queue.push(data.samples);
-        this.bufferedSamples += data.samples.length;
+        this.isPlaying = true;
       } else if (data.type === 'finish') {
-        this.minBuffer = 0;
+        this.isFinished = true;
       } else if (data.type === 'clear') {
         this.queue = [];
-        this.offset = 0;
-        this.bufferedSamples = 0;
+        this.currentChunk = null;
+        this.phase = 0.0;
         this.isPlaying = false;
-        this.minBuffer = 3600;
+        this.isFinished = false;
       }
     };
   }
@@ -71,42 +72,52 @@ class PcmStreamProcessor extends AudioWorkletProcessor {
     const outR = output.length > 1 ? output[1] : null;
     const bufferSize = outL.length;
 
-    // Jitter pre-buffering check
-    if (!this.isPlaying) {
-      if (this.bufferedSamples >= this.minBuffer && this.queue.length > 0) {
-        this.isPlaying = true;
-      } else {
-        outL.fill(0);
-        if (outR) outR.fill(0);
-        return true;
-      }
-    }
-
     let written = 0;
-    while (written < bufferSize && this.queue.length > 0) {
-      const chunk = this.queue[0];
-      const available = chunk.length - this.offset;
-      const needed = bufferSize - written;
+    while (written < bufferSize) {
+      if (!this.currentChunk) {
+        if (this.queue.length === 0) break;
+        this.currentChunk = this.queue.shift();
+        this.phase = 0.0;
+      }
 
-      if (available <= needed) {
-        outL.set(chunk.subarray(this.offset), written);
-        written += available;
-        this.bufferedSamples = Math.max(0, this.bufferedSamples - available);
-        this.queue.shift();
-        this.offset = 0;
+      const chunkLen = this.currentChunk.length;
+      const srcIdx = Math.floor(this.phase);
+      const frac = this.phase - srcIdx;
+
+      let s0 = 0.0;
+      let s1 = 0.0;
+
+      if (srcIdx + 1 < chunkLen) {
+        s0 = this.currentChunk[srcIdx];
+        s1 = this.currentChunk[srcIdx + 1];
+      } else if (this.queue.length > 0) {
+        s0 = this.currentChunk[srcIdx];
+        s1 = this.queue[0][0]; // Seamless continuous sample interpolation across chunks
       } else {
-        outL.set(chunk.subarray(this.offset, this.offset + needed), written);
-        this.offset += needed;
-        this.bufferedSamples = Math.max(0, this.bufferedSamples - needed);
-        written += needed;
+        s0 = this.currentChunk[Math.min(srcIdx, chunkLen - 1)];
+        s1 = s0;
+      }
+
+      outL[written] = s0 + frac * (s1 - s0);
+      written++;
+      this.phase += this.ratio;
+
+      if (this.phase >= chunkLen) {
+        this.phase -= chunkLen;
+        if (this.queue.length > 0) {
+          this.currentChunk = this.queue.shift();
+        } else {
+          this.currentChunk = null;
+          this.phase = 0.0;
+        }
       }
     }
 
     if (written < bufferSize) {
       outL.fill(0, written);
-      if (this.queue.length === 0) {
+      if (this.isFinished && this.queue.length === 0 && !this.currentChunk && this.isPlaying) {
         this.isPlaying = false;
-        this.minBuffer = 3600;
+        this.isFinished = false;
         this.port.postMessage({ type: 'empty' });
       }
     }
@@ -295,10 +306,8 @@ export function VoiceAgent({ data }: { data: any }) {
 
         node.port.onmessage = (event) => {
           if (event.data?.type === 'empty') {
-            if (isStreamingTurnFinishedRef.current) {
-              setIsPlaying(false);
-              setIsPlaybackPaused(false);
-            }
+            setIsPlaying(false);
+            setIsPlaybackPaused(false);
           }
         };
 
@@ -358,6 +367,9 @@ export function VoiceAgent({ data }: { data: any }) {
         console.log('[VoiceAgent] WebSocket connected successfully to:', wsUrl);
         setWsConnected(true);
         setWsStatusMsg('');
+        try {
+          ensureAudioContext();
+        } catch (e) {}
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = setInterval(() => {
@@ -426,20 +438,12 @@ export function VoiceAgent({ data }: { data: any }) {
               turnAudioUrl = fullUrl;
               setLastAudioUrl(fullUrl);
 
-              // Auto-play fallback if Web Audio queue was blocked by browser policy
-              if (!playedAnyPcmRef.current) {
-                stopAudioInternal();
-                const fallbackAudio = new Audio(fullUrl);
-                audioRef.current = fallbackAudio;
-                fallbackAudio.onplay = () => {
-                  setIsPlaying(true);
-                  setIsPlaybackPaused(false);
-                };
-                fallbackAudio.onended = () => {
-                  setIsPlaying(false);
-                };
-                fallbackAudio.play().catch(() => {});
-              }
+              // Calculate audio duration in seconds to cleanly reset isPlaying when speech completes
+              const totalSeconds = totalBytes / (24000 * 2);
+              setTimeout(() => {
+                setIsPlaying(false);
+                setIsPlaybackPaused(false);
+              }, Math.max(500, Math.round((totalSeconds + 0.3) * 1000)));
             } else {
               setIsPlaying(false);
               setIsPlaybackPaused(false);
@@ -637,29 +641,11 @@ export function VoiceAgent({ data }: { data: any }) {
         const ctx = ensureAudioContext();
         const workletNode = await ensureAudioWorklet(ctx);
 
-        // High quality linear interpolation resampling to match the hardware AudioContext sampleRate
-        let resampled: Float32Array;
-        if (ctx.sampleRate === sampleRate) {
-          resampled = float32;
-        } else {
-          const ratio = sampleRate / ctx.sampleRate;
-          const dstLength = Math.round(numSamples * (ctx.sampleRate / sampleRate));
-          resampled = new Float32Array(dstLength);
-          for (let i = 0; i < dstLength; i++) {
-            const pos = i * ratio;
-            const idx = Math.floor(pos);
-            const frac = pos - idx;
-            const s0 = idx < numSamples ? float32[idx] : float32[numSamples - 1];
-            const s1 = idx + 1 < numSamples ? float32[idx + 1] : s0;
-            resampled[i] = s0 + frac * (s1 - s0);
-          }
-        }
-
         if (workletNode) {
-          // Zero-copy transfer of resampled audio buffer directly to dedicated audio thread
+          // Zero-copy transfer of 24kHz Float32 buffer directly to dedicated real-time AudioWorklet thread
           workletNode.port.postMessage(
-            { type: 'chunk', samples: resampled },
-            [resampled.buffer]
+            { type: 'chunk', samples: float32 },
+            [float32.buffer]
           );
           playedAnyPcmRef.current = true;
           setIsPlaying(true);
