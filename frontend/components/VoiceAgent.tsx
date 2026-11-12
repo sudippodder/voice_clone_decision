@@ -147,6 +147,13 @@ export function VoiceAgent({ data }: { data: any }) {
   const [lastAudioUrl, setLastAudioUrl] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [wsStatusMsg, setWsStatusMsg] = useState('');
+  const [wsRtt, setWsRtt] = useState<number | null>(null);
+  const [networkStatus, setNetworkStatus] = useState<'strong' | 'weak' | 'poor' | 'offline'>('offline');
+  const [qualityNotice, setQualityNotice] = useState<{ type: 'warn' | 'error' | 'info'; message: string } | null>(null);
+  const lastPingSentTimeRef = useRef<number | null>(null);
+  const pingTimeoutRef = useRef<any>(null);
+  const noticeTimeoutRef = useRef<any>(null);
+  const prevNetworkStatusRef = useRef<'strong' | 'weak' | 'poor' | 'offline'>('offline');
   const [textInput, setTextInput] = useState('');
 
   // Discussion History & Pagination (default to newest first)
@@ -338,6 +345,15 @@ export function VoiceAgent({ data }: { data: any }) {
     return audioCtxRef.current;
   }
 
+  function showQualityNotice(type: 'warn' | 'error' | 'info', message: string) {
+    setQualityNotice({ type, message });
+    if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+    const dismissDelay = type === 'info' ? 4000 : 7000;
+    noticeTimeoutRef.current = setTimeout(() => {
+      setQualityNotice(null);
+    }, dismissDelay);
+  }
+
   // --- REAL-TIME WEBSOCKET MANAGEMENT ---
   const connectWebSocket = useCallback(() => {
     // If an existing socket is already OPEN or CONNECTING, do not open another
@@ -362,6 +378,26 @@ export function VoiceAgent({ data }: { data: any }) {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
+      function sendPing() {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          const now = Date.now();
+          lastPingSentTimeRef.current = now;
+          try {
+            wsRef.current.send(JSON.stringify({ type: 'ping', timestamp: now }));
+          } catch (e) {}
+
+          if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+          pingTimeoutRef.current = setTimeout(() => {
+            setWsRtt((prev) => (prev ? Math.max(prev, 999) : 999));
+            setNetworkStatus('poor');
+            showQualityNotice(
+              'warn',
+              'High network latency or packet delay detected. Voice streaming may pause or sound distorted.'
+            );
+          }, 3500);
+        }
+      }
+
       ws.onopen = () => {
         if (wsRef.current !== ws) return;
         console.log('[VoiceAgent] WebSocket connected successfully to:', wsUrl);
@@ -372,11 +408,13 @@ export function VoiceAgent({ data }: { data: any }) {
         } catch (e) {}
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
-        pingIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }));
-          }
-        }, 15000);
+
+        sendPing();
+        pingIntervalRef.current = setInterval(sendPing, 4000);
+
+        if (prevNetworkStatusRef.current === 'offline') {
+          showQualityNotice('info', 'Real-time voice stream connected.');
+        }
       };
 
       ws.onmessage = async (evt) => {
@@ -384,6 +422,45 @@ export function VoiceAgent({ data }: { data: any }) {
           const msg = JSON.parse(evt.data);
 
           if (msg.type === 'pong') {
+            if (pingTimeoutRef.current) {
+              clearTimeout(pingTimeoutRef.current);
+              pingTimeoutRef.current = null;
+            }
+            const now = Date.now();
+            const sentAt = msg.timestamp || lastPingSentTimeRef.current;
+            const rtt = sentAt ? Math.max(1, now - sentAt) : 50;
+            setWsRtt(rtt);
+
+            let quality: 'strong' | 'weak' | 'poor' = 'strong';
+            if (rtt > 500) {
+              quality = 'poor';
+            } else if (rtt > 220) {
+              quality = 'weak';
+            } else {
+              quality = 'strong';
+            }
+            setNetworkStatus(quality);
+
+            const prev = prevNetworkStatusRef.current;
+            if (quality === 'poor' && prev !== 'poor') {
+              showQualityNotice(
+                'warn',
+                `High network latency detected (${rtt}ms). Live voice streaming may experience audio stutter or haze.`
+              );
+            } else if (quality === 'weak' && prev === 'strong') {
+              showQualityNotice(
+                'warn',
+                `Network connection fluctuating (${rtt}ms). Voice quality may occasionally degrade.`
+              );
+            } else if (quality === 'strong' && (prev === 'weak' || prev === 'poor' || prev === 'offline')) {
+              if (prev !== 'offline') {
+                showQualityNotice(
+                  'info',
+                  `Network connection stable (${rtt}ms). Voice quality optimal.`
+                );
+              }
+            }
+            prevNetworkStatusRef.current = quality;
             return;
           } else if (msg.type === 'session_started') {
             setWsConnected(true);
@@ -501,6 +578,15 @@ export function VoiceAgent({ data }: { data: any }) {
         if (wsRef.current === ws) {
           wsRef.current = null;
           setWsConnected(false);
+          setNetworkStatus('offline');
+          setWsRtt(null);
+          if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+          if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+          showQualityNotice(
+            'error',
+            'Real-time voice stream went offline. Reconnecting automatically…'
+          );
+          prevNetworkStatusRef.current = 'offline';
           const shortUrl = wsUrl.replace(/^wss?:\/\//, '');
           const reasonText =
             evt.code === 1008
@@ -524,6 +610,14 @@ export function VoiceAgent({ data }: { data: any }) {
         console.warn('[VoiceAgent] WebSocket error on:', wsUrl, err);
         if (wsRef.current === ws) {
           setWsConnected(false);
+          setNetworkStatus('offline');
+          setWsRtt(null);
+          if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+          showQualityNotice(
+            'warn',
+            'Network connection error encountered on real-time voice stream.'
+          );
+          prevNetworkStatusRef.current = 'offline';
           const shortUrl = wsUrl.replace(/^wss?:\/\//, '');
           setWsStatusMsg(`Failed to connect to ${shortUrl}`);
         }
@@ -532,6 +626,8 @@ export function VoiceAgent({ data }: { data: any }) {
     } catch (e) {
       console.warn('WebSocket connection not initialized:', e);
       setWsConnected(false);
+      setNetworkStatus('offline');
+      setWsRtt(null);
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = setTimeout(() => {
         connectWebSocket();
@@ -544,6 +640,8 @@ export function VoiceAgent({ data }: { data: any }) {
     return () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+      if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
       if (wsRef.current) {
         try {
           wsRef.current.close(1000);
@@ -560,6 +658,8 @@ export function VoiceAgent({ data }: { data: any }) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
       stopAudioInternal();
+      if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+      if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
       if (workletNodeRef.current) {
         try {
           workletNodeRef.current.disconnect();
@@ -1183,16 +1283,41 @@ export function VoiceAgent({ data }: { data: any }) {
             onClick={() => {
               connectWebSocket();
             }}
-            title={wsConnected ? 'Real-time WebSocket streaming connected' : 'Click to connect real-time stream'}
+            title={wsConnected ? 'Real-time WebSocket streaming connected (click to reconnect)' : 'Click to connect real-time stream'}
             className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/30 text-violet-300 text-xs font-bold tracking-wider uppercase transition-colors hover:bg-violet-500/20 cursor-pointer"
           >
-            <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-            {wsConnected ? '⚡ REAL-TIME VOICE STREAMING ACTIVE' : 'DIGITAL EXECUTIVE VOICE AGENT (CONNECT)'}
+            <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+            {wsConnected ? '⚡ STREAMING ACTIVE' : 'VOICE OFFLINE (RECONNECT)'}
           </button>
           {wsConnected ? (
-            <span className="text-[11px] font-mono text-emerald-400/90 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
-              PCM 24kHz • &lt;800ms Latency
-            </span>
+            <>
+              <span className="text-[11px] font-mono text-emerald-400/90 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
+                PCM 24kHz • &lt;800ms Latency
+              </span>
+              <span
+                className={`text-[11px] font-mono px-2 py-0.5 rounded border flex items-center gap-1.5 transition-colors ${
+                  networkStatus === 'strong'
+                    ? 'text-emerald-300 bg-emerald-950/60 border-emerald-500/40'
+                    : networkStatus === 'weak'
+                    ? 'text-amber-300 bg-amber-950/60 border-amber-500/50 animate-pulse'
+                    : 'text-red-300 bg-red-950/60 border-red-500/50 animate-pulse'
+                }`}
+                title={`Live WebSocket Ping RTT: ${wsRtt !== null ? `${wsRtt}ms` : 'Measuring…'} • Quality: ${networkStatus}`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    networkStatus === 'strong'
+                      ? 'bg-emerald-400'
+                      : networkStatus === 'weak'
+                      ? 'bg-amber-400'
+                      : 'bg-red-400'
+                  }`}
+                />
+                {wsRtt !== null ? `${wsRtt}ms` : 'Checking…'} • {
+                  networkStatus === 'strong' ? 'Network Strong' : networkStatus === 'weak' ? 'Weak Network' : 'High Jitter'
+                }
+              </span>
+            </>
           ) : (
             <span
               onClick={() => {
@@ -1206,13 +1331,42 @@ export function VoiceAgent({ data }: { data: any }) {
                   `3. Check browser console (F12) for detailed network traces.`
                 );
               }}
-              className="text-[11px] font-mono text-amber-400/90 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/30 max-w-sm truncate cursor-pointer hover:border-amber-400"
+              className="text-[11px] font-mono text-amber-400/90 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/30 max-w-sm truncate cursor-pointer hover:border-amber-400 flex items-center gap-1.5"
               title="Click for WebSocket connection diagnostics"
             >
-              HTTP Fallback {wsStatusMsg ? `(${wsStatusMsg})` : 'Active'} ⓘ
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
+              {wsStatusMsg ? `Offline (${wsStatusMsg})` : 'Offline • Reconnecting…'} ⓘ
             </span>
           )}
         </div>
+
+        {/* Voice Quality Notification Alert Banner */}
+        {qualityNotice && (
+          <div
+            className={`mx-auto max-w-xl mt-2 p-2.5 rounded-xl border text-xs text-left flex items-start gap-2.5 transition-all animate-fade-in ${
+              qualityNotice.type === 'error'
+                ? 'bg-red-950/80 border-red-500/50 text-red-200 shadow-lg shadow-red-950/50'
+                : qualityNotice.type === 'warn'
+                ? 'bg-amber-950/80 border-amber-500/50 text-amber-200 shadow-lg shadow-amber-950/50'
+                : 'bg-emerald-950/80 border-emerald-500/50 text-emerald-200 shadow-lg shadow-emerald-950/50'
+            }`}
+          >
+            <span className="text-base leading-none mt-0.5">
+              {qualityNotice.type === 'error' ? '🔴' : qualityNotice.type === 'warn' ? '⚠️' : '🟢'}
+            </span>
+            <div className="flex-1 font-medium leading-relaxed">
+              {qualityNotice.message}
+            </div>
+            <button
+              type="button"
+              onClick={() => setQualityNotice(null)}
+              className="text-slate-400 hover:text-white text-xs px-1.5 py-0.5 hover:bg-white/10 rounded transition-colors"
+              title="Dismiss notification"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         <h2 className="text-3xl font-black mt-2 text-white tracking-tight">
           {data.client.executive_name}

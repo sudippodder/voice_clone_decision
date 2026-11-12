@@ -631,7 +631,7 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
 
             # Case 0: Heartbeat Ping/Pong
             if msg_type == "ping":
-                await websocket.send_json({"type": "pong"})
+                await websocket.send_json({"type": "pong", "timestamp": data.get("timestamp")})
                 continue
 
             # Case 1: User Barge-In / Interruption
@@ -725,7 +725,7 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
 
             # Case 4: Heartbeat ping
             elif msg_type == "ping":
-                await websocket.send_json({"type": "pong"})
+                await websocket.send_json({"type": "pong", "timestamp": data.get("timestamp")})
 
     except WebSocketDisconnect:
         print(f"[WebSocket] Client {client_id} disconnected normally.")
