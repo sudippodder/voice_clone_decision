@@ -171,8 +171,16 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
     messages = [{"role": "system", "content": system_prompt}]
 
     for item in history[-6:]:
-        if item.get("role") in ("user", "assistant"):
-            messages.append({"role": item["role"], "content": item["text"]})
+        role = item.get("role")
+        text = (item.get("text") or "").strip()
+        if role in ("user", "assistant"):
+            # Do not let prior fallback refusal messages anchor the model if evidence is now available
+            if role == "assistant" and "cannot determine" in text.lower() and state.get("has_sufficient_evidence"):
+                continue
+            # Avoid duplicate trailing user query
+            if role == "user" and text.lower() == user_text.strip().lower():
+                continue
+            messages.append({"role": role, "content": text})
 
     messages.append({"role": "user", "content": user_text})
 
@@ -443,8 +451,11 @@ async def handle_realtime_voice_websocket(websocket: WebSocket, client_id: int):
                 user_msg.audio_mime = f"audio/{user_audio_ext}"
                 session_db.commit()
 
-            # Load history and memories while session is open
-            previous = session_db.query(Message).filter(Message.conversation_id == conversation.id).order_by(Message.id.asc()).all()
+            # Load history excluding current message while session is open
+            previous = session_db.query(Message).filter(
+                Message.conversation_id == conversation.id,
+                Message.id != user_msg.id
+            ).order_by(Message.id.asc()).all()
             history_list = [{"role": m.role, "text": m.text} for m in previous]
             memories_list = session_db.query(Memory).filter(Memory.client_id == client_id).all()
 

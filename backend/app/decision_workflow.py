@@ -415,10 +415,16 @@ APPROVED DATABASE EVIDENCE (SOURCE OF TRUTH)
     llm = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     messages = [{"role": "system", "content": system_prompt}]
 
-    # Maintain recent conversation turns
+    # Maintain clean recent conversation turns
     for item in state.get("history", [])[-6:]:
-        if item.get("role") in ("user", "assistant"):
-            messages.append({"role": item["role"], "content": item["text"]})
+        role = item.get("role")
+        text = (item.get("text") or "").strip()
+        if role in ("user", "assistant"):
+            if role == "assistant" and "cannot determine" in text.lower() and state.get("has_sufficient_evidence"):
+                continue
+            if role == "user" and text.lower() == user_text.strip().lower():
+                continue
+            messages.append({"role": role, "content": text})
 
     messages.append({"role": "user", "content": user_text})
 

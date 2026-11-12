@@ -14,3 +14,6 @@ backend/recordings/
 *.mp3
 *.webm
 *.ogg
+.venv/
+venv/
+env/

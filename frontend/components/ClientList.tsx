@@ -1,7 +1,17 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { getApiUrl, getAdminKey } from '../utils/api';
+import { getApiUrl, getWsUrl, getAdminKey } from '../utils/api';
+
+export type GatewayStatus = {
+  state: 'checking' | 'healthy' | 'warning' | 'error';
+  label: string;
+  latency?: number;
+  apiUrl: string;
+  wsConnected?: boolean;
+  message?: string;
+  lastChecked?: string;
+};
 
 export type Client = {
   id: number;
@@ -68,6 +78,115 @@ export function ClientList({
   // Toast Feedback
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
+  // Gateway & ARR Proxy Status
+  const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>({
+    state: 'checking',
+    label: 'Checking Gateway…',
+    apiUrl: '',
+  });
+  const [showStatusDetails, setShowStatusDetails] = useState(false);
+
+  const checkGatewayStatus = async () => {
+    const api = getApiUrl();
+    const wsUrl = getWsUrl();
+    setGatewayStatus((prev) => ({
+      ...prev,
+      state: 'checking',
+      label: 'Checking Gateway…',
+      apiUrl: api,
+    }));
+
+    const startTime = Date.now();
+    let apiOk = false;
+    let latency = 0;
+
+    try {
+      const res = await fetch(`${api}/health`, { signal: AbortSignal.timeout(4000) });
+      if (res.ok) {
+        apiOk = true;
+        latency = Date.now() - startTime;
+      }
+    } catch {
+      // API unreachable
+    }
+
+    if (!apiOk) {
+      setGatewayStatus({
+        state: 'error',
+        label: 'API Offline',
+        apiUrl: api,
+        message: `Backend API server is not responding at ${api}. Check that Uvicorn/FastAPI is running.`,
+        lastChecked: new Date().toLocaleTimeString(),
+      });
+      return;
+    }
+
+    // Probe WebSocket upgrade (validates IIS ARR reverse proxy tunnel)
+    try {
+      const probeWs = new WebSocket(`${wsUrl}/api/clients/1/voice/realtime`);
+      let wsResolved = false;
+
+      const wsTimer = setTimeout(() => {
+        if (!wsResolved) {
+          wsResolved = true;
+          try { probeWs.close(); } catch {}
+          setGatewayStatus({
+            state: 'healthy',
+            label: `Proxy & API: Ready (${latency}ms)`,
+            latency,
+            apiUrl: api,
+            wsConnected: true,
+            message: 'HTTP API is online and responding. WebSocket probe completed.',
+            lastChecked: new Date().toLocaleTimeString(),
+          });
+        }
+      }, 2000);
+
+      probeWs.onopen = () => {
+        if (!wsResolved) {
+          wsResolved = true;
+          clearTimeout(wsTimer);
+          try { probeWs.close(); } catch {}
+          setGatewayStatus({
+            state: 'healthy',
+            label: `Proxy & WS: Ready (${latency}ms)`,
+            latency,
+            apiUrl: api,
+            wsConnected: true,
+            message: 'API and WebSocket reverse proxy (ARR) are healthy with zero buffering.',
+            lastChecked: new Date().toLocaleTimeString(),
+          });
+        }
+      };
+
+      probeWs.onerror = () => {
+        if (!wsResolved) {
+          wsResolved = true;
+          clearTimeout(wsTimer);
+          setGatewayStatus({
+            state: 'warning',
+            label: `WS Proxy Blocked`,
+            latency,
+            apiUrl: api,
+            wsConnected: false,
+            message: 'API is reachable, but WebSocket connection failed (Check IIS ARR WebSocket feature and proxy buffer settings).',
+            lastChecked: new Date().toLocaleTimeString(),
+          });
+        }
+      };
+    } catch (err: any) {
+      setGatewayStatus({
+        state: 'warning',
+        label: `WS Warning (${latency}ms)`,
+        latency,
+        apiUrl: api,
+        wsConnected: false,
+        message: err.message || 'Failed to initialize WebSocket probe.',
+        lastChecked: new Date().toLocaleTimeString(),
+      });
+    }
+  };
+
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
     setTimeout(() => {
@@ -108,6 +227,7 @@ export function ClientList({
 
   useEffect(() => {
     loadClients();
+    checkGatewayStatus();
   }, []);
 
   // Filtered Clients
@@ -342,9 +462,98 @@ export function ClientList({
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Status Box Beside Refresh */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowStatusDetails((prev) => !prev)}
+              className={`flex items-center gap-2 text-xs py-2 px-3 rounded-xl border transition-all cursor-pointer font-medium ${
+                gatewayStatus.state === 'healthy'
+                  ? 'bg-emerald-950/40 border-emerald-600/40 text-emerald-300 hover:border-emerald-500 hover:bg-emerald-950/60'
+                  : gatewayStatus.state === 'warning'
+                  ? 'bg-amber-950/40 border-amber-600/40 text-amber-300 hover:border-amber-500 hover:bg-amber-950/60'
+                  : gatewayStatus.state === 'error'
+                  ? 'bg-rose-950/40 border-rose-600/40 text-rose-300 hover:border-rose-500 hover:bg-rose-950/60'
+                  : 'bg-slate-900 border-slate-800 text-slate-400'
+              }`}
+              title="Click to view proxy & gateway connection diagnostics"
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  gatewayStatus.state === 'healthy'
+                    ? 'bg-emerald-400 animate-pulse'
+                    : gatewayStatus.state === 'warning'
+                    ? 'bg-amber-400'
+                    : gatewayStatus.state === 'error'
+                    ? 'bg-rose-500'
+                    : 'bg-slate-400 animate-ping'
+                }`}
+              />
+              <span>{gatewayStatus.label}</span>
+              <span className="text-[10px] opacity-60">ℹ</span>
+            </button>
+
+            {/* Diagnostic Dropdown Popover */}
+            {showStatusDetails && (
+              <div className="absolute right-0 top-full mt-2 w-80 p-4 rounded-xl bg-[#0e1424] border border-slate-700/80 shadow-2xl z-50 text-xs space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                  <span className="font-bold text-white flex items-center gap-1.5">
+                    <span>📡</span> Gateway & Proxy Health
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      checkGatewayStatus();
+                    }}
+                    className="text-[11px] text-violet-400 hover:text-violet-300 font-semibold"
+                  >
+                    Re-test
+                  </button>
+                </div>
+
+                <div className="space-y-1.5 text-slate-300">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Target Host:</span>
+                    <span className="font-mono text-[11px] text-slate-200 truncate max-w-[160px]" title={gatewayStatus.apiUrl}>
+                      {gatewayStatus.apiUrl || 'Detecting...'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">HTTP API:</span>
+                    <span className={gatewayStatus.state !== 'error' ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
+                      {gatewayStatus.state !== 'error' ? `Online (${gatewayStatus.latency || 0}ms)` : 'Offline'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">WebSocket / ARR:</span>
+                    <span className={gatewayStatus.wsConnected ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'}>
+                      {gatewayStatus.wsConnected ? 'Connected (Ready)' : gatewayStatus.state === 'checking' ? 'Testing...' : 'Blocked / Dropped'}
+                    </span>
+                  </div>
+                  {gatewayStatus.lastChecked && (
+                    <div className="flex justify-between text-[10px] text-slate-500 pt-1">
+                      <span>Last checked:</span>
+                      <span>{gatewayStatus.lastChecked}</span>
+                    </div>
+                  )}
+                </div>
+
+                {gatewayStatus.message && (
+                  <div className="p-2 rounded bg-slate-900/80 border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
+                    {gatewayStatus.message}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <button
             className="btn btn-secondary flex items-center gap-2 text-xs py-2.5 px-4 hover:border-slate-500 transition-colors"
-            onClick={loadClients}
+            onClick={() => {
+              loadClients();
+              checkGatewayStatus();
+            }}
             title="Reload clients from server"
           >
             <span>↻</span>

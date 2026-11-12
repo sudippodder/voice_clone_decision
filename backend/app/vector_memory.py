@@ -6,6 +6,14 @@ from .config import settings
 from .db import SessionLocal
 from .models import KnowledgeChunk
 
+# Common conversational stopwords to ignore in keyword overlap scoring
+STOPWORDS = {
+    "what", "about", "the", "how", "are", "you", "can", "explain", "tell", "me",
+    "is", "in", "of", "for", "to", "a", "an", "and", "or", "with", "this", "that",
+    "does", "do", "we", "our", "it", "there", "please", "give", "any", "information",
+    "why", "when", "where", "which", "who", "whom", "whose", "their", "they", "them"
+}
+
 def embed_text(content: str) -> list[float] | None:
     if not settings.openai_api_key:
         return None
@@ -20,15 +28,61 @@ def embed_text(content: str) -> list[float] | None:
             direct_client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url, http_client=direct_http)
             response = direct_client.embeddings.create(model=settings.embedding_model, input=content[:8000])
             return response.data[0].embedding
-        raise
+        print(f"Warning: Failed to generate embedding: {err}")
+        return None
+
+def split_content_into_chunks(content: str, max_chars: int = 1200, overlap: int = 150) -> list[str]:
+    """Splits document content naturally by paragraphs or sentences while preserving context boundaries."""
+    paragraphs = re.split(r"\n\s*\n", content.strip())
+    chunks: list[str] = []
+    current = ""
+
+    for p in paragraphs:
+        p_clean = p.strip()
+        if not p_clean:
+            continue
+        if len(current) + len(p_clean) + 2 <= max_chars:
+            current = (current + "\n\n" + p_clean) if current else p_clean
+        else:
+            if current:
+                chunks.append(current)
+            if len(p_clean) <= max_chars:
+                current = p_clean
+            else:
+                # Fallback for huge paragraphs without double newlines: split on sentence boundaries
+                sentences = re.split(r"(?<=[.!?])\s+", p_clean)
+                sub_chunk = ""
+                for s in sentences:
+                    if len(sub_chunk) + len(s) + 1 <= max_chars:
+                        sub_chunk = (sub_chunk + " " + s) if sub_chunk else s
+                    else:
+                        if sub_chunk:
+                            chunks.append(sub_chunk)
+                        sub_chunk = s
+                current = sub_chunk
+
+    if current:
+        chunks.append(current)
+
+    # Fallback to sliding window if content could not be chunked
+    if not chunks:
+        chunks = [content[i:i+max_chars] for i in range(0, len(content), max_chars - overlap) if content[i:i+max_chars].strip()]
+
+    return chunks
 
 def save_chunks(client_id: int, source_name: str, content: str) -> int:
-    chunks = [content[i:i+1200] for i in range(0, len(content), 1000) if content[i:i+1200].strip()]
+    chunks = split_content_into_chunks(content)
     db = SessionLocal()
     try:
         for idx, chunk in enumerate(chunks):
             embedding = embed_text(chunk)
-            db.add(KnowledgeChunk(client_id=client_id, source_name=source_name, chunk_index=idx, content=chunk, embedding=embedding))
+            db.add(KnowledgeChunk(
+                client_id=client_id,
+                source_name=source_name,
+                chunk_index=idx,
+                content=chunk,
+                embedding=embedding
+            ))
         db.commit()
         return len(chunks)
     finally:
@@ -46,21 +100,28 @@ def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
         return 0.0
 
 def search_chunks(client_id: int, query: str, limit: int = 4, min_similarity: float = 0.28) -> list[dict]:
-    """Search vector chunks for a specific client with hybrid (vector + lexical) matching.
-    Returns an empty list if no chunks meet the minimum relevance threshold.
+    """Optimized hybrid (vector + lexical) search for client knowledge chunks.
+    Combines dense semantic vector search with punctuation-insensitive, stem-aware keyword matching.
     """
     try:
         embedding = embed_text(query)
-        clean_q = re.sub(r"\s+", " ", query.strip().lower().strip(".,!?;:\"'"))
-        q_tokens = [w for w in clean_q.split() if len(w) >= 3]
+
+        # 1. Normalized phrase for punctuation-insensitive matching (removes colons, hyphens, quotes, newlines)
+        clean_q_alpha = re.sub(r"[^\w\s]", " ", query.lower())
+        clean_q_phrase = re.sub(r"\s+", " ", clean_q_alpha).strip()
+
+        # 2. Extract substantive query keywords (filtering stopwords)
+        q_tokens = [w for w in clean_q_phrase.split() if len(w) >= 3 and w not in STOPWORDS]
+        if not q_tokens:
+            q_tokens = [w for w in clean_q_phrase.split() if len(w) >= 3]
 
         db = SessionLocal()
         try:
             chunks_dict: dict[int, dict] = {}
 
-            # Strategy 1: Vector Search (native pgvector or in-memory fallback)
-            try:
-                if embedding is not None:
+            # --- Strategy 1: Vector Search (pgvector or in-memory fallback) ---
+            if embedding is not None:
+                try:
                     max_distance = 1.0 - min_similarity
                     stmt = select(
                         KnowledgeChunk,
@@ -81,10 +142,9 @@ def search_chunks(client_id: int, query: str, limit: int = 4, min_similarity: fl
                             "content": c.content,
                             "similarity": sim
                         }
-            except Exception:
-                db.rollback()
-                # In-memory cosine similarity fallback
-                if embedding is not None:
+                except Exception:
+                    db.rollback()
+                    # In-memory cosine similarity fallback
                     rows = db.execute(select(KnowledgeChunk).where(
                         KnowledgeChunk.client_id == client_id,
                         KnowledgeChunk.embedding.is_not(None)
@@ -100,38 +160,52 @@ def search_chunks(client_id: int, query: str, limit: int = 4, min_similarity: fl
                                     "similarity": round(sim, 3)
                                 }
 
-            # Strategy 2: Lexical Phrase & Token Matching across all client chunks
-            if len(clean_q) >= 3:
+            # --- Strategy 2: Resilient Lexical Matching across all chunks ---
+            if len(clean_q_phrase) >= 3:
                 all_chunks = db.execute(select(KnowledgeChunk).where(
                     KnowledgeChunk.client_id == client_id
                 )).scalars().all()
 
                 for c in all_chunks:
-                    norm_content = re.sub(r"\s+", " ", c.content.lower())
-                    # Exact phrase match (e.g. "how are you", "risk-free trial")
-                    if clean_q in norm_content:
+                    norm_content_alpha = re.sub(r"[^\w\s]", " ", c.content.lower())
+                    norm_content_phrase = re.sub(r"\s+", " ", norm_content_alpha)
+
+                    # Case A: Exact phrase match (handles colons, dashes, newlines in headings)
+                    if len(clean_q_phrase) >= 5 and clean_q_phrase in norm_content_phrase:
+                        exact_sim = 0.90
                         if c.id in chunks_dict:
-                            chunks_dict[c.id]["similarity"] = max(chunks_dict[c.id]["similarity"], 0.88)
+                            chunks_dict[c.id]["similarity"] = max(chunks_dict[c.id]["similarity"], exact_sim)
                         else:
                             chunks_dict[c.id] = {
                                 "id": c.id,
                                 "source": c.source_name or "upload",
                                 "content": c.content,
-                                "similarity": 0.88
+                                "similarity": exact_sim
                             }
-                    # Token overlap match: if at least 2 significant query tokens match
-                    elif len(q_tokens) >= 2:
-                        matched_tokens = sum(1 for t in q_tokens if t in norm_content)
-                        if matched_tokens >= len(q_tokens):
-                            overlap_sim = 0.65
+
+                    # Case B: Substantive token overlap with morphological stem support
+                    elif q_tokens:
+                        doc_words = set(norm_content_phrase.split())
+                        matched = 0
+                        for qw in q_tokens:
+                            # 4-5 char stem prefix (e.g. principle -> principles, apply -> applies/applying)
+                            stem = qw[:5] if len(qw) >= 6 else (qw[:4] if len(qw) >= 4 else qw)
+                            if qw in doc_words or any(dw.startswith(stem) or qw.startswith(dw[:4]) for dw in doc_words if len(dw) >= 4):
+                                matched += 1
+
+                        # Require at least 2 keywords for multi-word queries, or 1 for single-word
+                        min_required = 1 if len(q_tokens) == 1 else (2 if len(q_tokens) <= 3 else max(2, int(len(q_tokens) * 0.5)))
+                        if matched >= min_required:
+                            overlap_ratio = matched / len(q_tokens)
+                            lex_sim = round(0.55 + 0.35 * overlap_ratio, 3)
                             if c.id in chunks_dict:
-                                chunks_dict[c.id]["similarity"] = max(chunks_dict[c.id]["similarity"], overlap_sim)
+                                chunks_dict[c.id]["similarity"] = max(chunks_dict[c.id]["similarity"], lex_sim)
                             else:
                                 chunks_dict[c.id] = {
                                     "id": c.id,
                                     "source": c.source_name or "upload",
                                     "content": c.content,
-                                    "similarity": overlap_sim
+                                    "similarity": lex_sim
                                 }
 
             ranked = sorted(chunks_dict.values(), key=lambda x: x["similarity"], reverse=True)
